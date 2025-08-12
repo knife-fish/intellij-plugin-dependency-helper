@@ -1,6 +1,6 @@
 <!-- Keep a Changelog guide -> https://keepachangelog.com -->
 
-# intellij-plugin-dependency-helper Changelog
+# Dependency Helper Changelog
 
 ## [Unreleased]
 ### Added

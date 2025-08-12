@@ -1,0 +1,17 @@
+<idea-plugin>
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow factoryClass="org.knifefish.dependency.helper.toolWindow.DependencyToolWindowFactory" id="Dependency Helper" anchor="bottom"/>
+        <fileEditorProvider implementation="org.knifefish.dependency.helper.editor.DependencyAnalyzerFileEditorProvider"/>
+        <postStartupActivity implementation="org.knifefish.dependency.helper.startup.MyProjectActivity" />
+        <lang.documentationProvider
+                language="XML"
+                implementationClass="org.knifefish.dependency.helper.documentation.DependencyDocumentationProvider"/>
+    </extensions>
+
+    <extensions defaultExtensionNs="com.intellij.platform.backend">
+        <documentation.targetProvider
+                implementation="org.knifefish.dependency.helper.documentation.DependencyDocumentationTargetProvider"/>
+        <documentation.linkHandler
+                implementation="org.knifefish.dependency.helper.documentation.DependencyDocumentationLinkHandler"/>
+    </extensions>
+</idea-plugin>

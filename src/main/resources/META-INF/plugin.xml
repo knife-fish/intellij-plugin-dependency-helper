@@ -1,15 +1,27 @@
 <!-- Plugin Configuration File. Read more: https://plugins.jetbrains.com/docs/intellij/plugin-configuration-file.html -->
 <idea-plugin>
-    <id>com.github.evil0th.intellijplugindependencyhelper</id>
-    <name>intellij-plugin-dependency-helper</name>
-    <vendor>evil0th</vendor>
+    <id>org.knifefish.dependency.helper</id>
+    <name>Dependency Helper</name>
+    <vendor>Knifefish</vendor>
+    <description><![CDATA[
+        <p><b>Dependency Helper</b> scans Maven, Gradle, package.json, Python, and Cargo dependency files.</p>
+        <p>It highlights newer releases inline, supports package search, and offers a dependency dashboard with basic conflict and exclusion guidance.</p>
+    ]]></description>
 
     <depends>com.intellij.modules.platform</depends>
+    <depends optional="true" config-file="optional-maven.xml">org.jetbrains.idea.maven</depends>
 
     <resource-bundle>messages.MyBundle</resource-bundle>
 
     <extensions defaultExtensionNs="com.intellij">
-        <toolWindow factoryClass="com.github.evil0th.intellijplugindependencyhelper.toolWindow.MyToolWindowFactory" id="MyToolWindow"/>
-        <postStartupActivity implementation="com.github.evil0th.intellijplugindependencyhelper.startup.MyProjectActivity" />
     </extensions>
+
+    <actions>
+        <action id="DependencyHelper.RefreshHints"
+                class="org.knifefish.dependency.helper.actions.RefreshDependencyHintsAction"
+                text="Refresh Dependency Hints"/>
+        <action id="DependencyHelper.UpgradeDependency"
+                class="org.knifefish.dependency.helper.actions.UpgradeDependencyAction"
+                text="Upgrade Dependency to Latest Stable"/>
+    </actions>
 </idea-plugin>
