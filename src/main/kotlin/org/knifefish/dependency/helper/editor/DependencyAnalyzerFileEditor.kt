@@ -9,7 +9,7 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.UserDataHolderBase
 import com.intellij.openapi.vfs.VirtualFile
 import org.knifefish.dependency.helper.services.DependencyInsightService
-import org.knifefish.dependency.helper.services.MavenDependencyAnalyzer
+import org.knifefish.dependency.helper.services.MavenSupport
 import org.knifefish.dependency.helper.toolWindow.DependencyAnalyzerPanel
 import java.beans.PropertyChangeListener
 import javax.swing.JComponent
@@ -22,7 +22,7 @@ class DependencyAnalyzerFileEditor(
     private val panel = DependencyAnalyzerPanel(
         project = project,
         service = project.service<DependencyInsightService>(),
-        mavenAnalyzer = project.service<MavenDependencyAnalyzer>(),
+        mavenSupport = requireNotNull(project.getService(MavenSupport::class.java)),
     )
 
     override fun getComponent(): JComponent = panel

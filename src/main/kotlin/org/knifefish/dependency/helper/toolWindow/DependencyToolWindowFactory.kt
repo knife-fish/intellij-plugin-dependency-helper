@@ -10,12 +10,7 @@ import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowFactory
 import com.intellij.ui.JBColor
 import com.intellij.ui.SearchTextField
-import com.intellij.ui.components.JBCheckBox
-import com.intellij.ui.components.JBLabel
-import com.intellij.ui.components.JBList
-import com.intellij.ui.components.JBScrollPane
-import com.intellij.ui.components.JBTabbedPane
-import com.intellij.ui.components.JBTextArea
+import com.intellij.ui.components.*
 import com.intellij.ui.content.ContentFactory
 import kotlinx.html.b
 import kotlinx.html.body
@@ -26,35 +21,15 @@ import org.knifefish.dependency.helper.model.LatestVersionPolicy
 import org.knifefish.dependency.helper.model.MavenDependencyNodeView
 import org.knifefish.dependency.helper.model.PackageSearchResult
 import org.knifefish.dependency.helper.services.DependencyInsightService
-import org.knifefish.dependency.helper.services.MavenDependencyAnalyzer
-import java.awt.BorderLayout
-import java.awt.CardLayout
-import java.awt.Component
-import java.awt.Dimension
-import java.awt.FlowLayout
-import java.awt.GridLayout
-import java.awt.Insets
+import org.knifefish.dependency.helper.services.MavenSupport
+import java.awt.*
 import java.awt.event.KeyAdapter
 import java.awt.event.KeyEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.nio.file.Files
 import java.nio.file.Paths
-import javax.swing.ButtonGroup
-import javax.swing.DefaultComboBoxModel
-import javax.swing.DefaultListCellRenderer
-import javax.swing.DefaultListModel
-import javax.swing.Icon
-import javax.swing.JButton
-import javax.swing.JComboBox
-import javax.swing.JList
-import javax.swing.JPanel
-import javax.swing.JPopupMenu
-import javax.swing.JRadioButton
-import javax.swing.JSplitPane
-import javax.swing.Timer
-import javax.swing.JTree
-import javax.swing.ListSelectionModel
+import javax.swing.*
 import javax.swing.tree.DefaultMutableTreeNode
 import javax.swing.tree.DefaultTreeCellRenderer
 import javax.swing.tree.DefaultTreeModel
@@ -62,7 +37,11 @@ import javax.swing.tree.DefaultTreeModel
 class DependencyToolWindowFactory : ToolWindowFactory {
 
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
-        val panel = DependencyAnalyzerPanel(project, project.service(), project.service())
+        val panel = DependencyAnalyzerPanel(
+            project = project,
+            service = project.service(),
+            mavenSupport = requireNotNull(project.getService(MavenSupport::class.java)),
+        )
         val content = ContentFactory.getInstance().createContent(panel, null, false)
         toolWindow.contentManager.addContent(content)
     }
@@ -73,7 +52,7 @@ class DependencyToolWindowFactory : ToolWindowFactory {
 class DependencyAnalyzerPanel(
     private val project: Project,
     private val service: DependencyInsightService,
-    private val mavenAnalyzer: MavenDependencyAnalyzer,
+    private val mavenSupport: MavenSupport,
 ) : SimpleToolWindowPanel(true, true) {
 
     private val treeModeButton = JRadioButton("Tree", true)
@@ -283,7 +262,7 @@ class DependencyAnalyzerPanel(
     }
 
     private fun reloadDependencies() {
-        roots = mavenAnalyzer.analyze()
+        roots = mavenSupport.analyze()
         artifactSizeLabelByCoordinate.clear()
         conflictKeys = flatten(roots)
             .filter { it.path.size > 1 }
@@ -359,7 +338,7 @@ class DependencyAnalyzerPanel(
         ApplicationManager.getApplication().executeOnPooledThread {
             val versions = nodes.associate { node ->
                 val latest = service.lookupLatestVersion(
-                    mavenAnalyzer.toDependencyCoordinate(node),
+                    mavenSupport.toDependencyCoordinate(node),
                     service.repositoriesFor(Ecosystem.MAVEN),
                 ).latestStable
                 node.key to (latest ?: "")
@@ -377,8 +356,8 @@ class DependencyAnalyzerPanel(
         val source = node.sourceDependency ?: return
         val latest = service.lookupLatestVersion(source, service.repositoriesFor(Ecosystem.MAVEN)).latestStable ?: return
         if (source.usesManagedVersion) {
-            mavenAnalyzer.upgradeManagedDependency(source, latest)
-            mavenAnalyzer.refreshMavenProject(source.file) {
+            mavenSupport.upgradeManagedDependency(source, latest)
+            mavenSupport.refreshMavenProject(source.file) {
                 reloadDependencies()
                 analysisSummaryArea.text = "Updated ${node.groupId}:${node.artifactId} to $latest."
             }
@@ -391,14 +370,14 @@ class DependencyAnalyzerPanel(
 
     private fun excludeSelected() {
         val node = selectedNode() ?: return
-        if (mavenAnalyzer.exclude(node)) {
+        if (mavenSupport.exclude(node)) {
             reloadDependencies()
             analysisSummaryArea.text = "Excluded ${node.groupId}:${node.artifactId} from ${node.path.getOrNull(1)}."
         }
     }
 
     private fun jumpToSource() {
-        selectedNode()?.let(mavenAnalyzer::jumpToSource)
+        selectedNode()?.let(mavenSupport::jumpToSource)
     }
 
     private fun selectedNode(): MavenDependencyNodeView? {
@@ -413,7 +392,7 @@ class DependencyAnalyzerPanel(
         if (node == null) {
             return "Select a Maven dependency to inspect dependency path, latest version, source jump, or exclusion options."
         }
-        val coordinate = mavenAnalyzer.toDependencyCoordinate(node)
+        val coordinate = mavenSupport.toDependencyCoordinate(node)
         val latest = service.lookupLatestVersion(coordinate, service.repositoriesFor(Ecosystem.MAVEN))
         return buildString {
             appendLine("Package: ${node.displayName}")
@@ -555,7 +534,7 @@ class DependencyAnalyzerPanel(
         val selected = selectedNode() ?: return
         val source = selected.sourceDependency
         val managedOptions = if (source?.usesManagedVersion == true) {
-            mavenAnalyzer.resolveManagedUpgradeOptions(source)
+            mavenSupport.resolveManagedUpgradeOptions(source)
         } else {
             emptyList()
         }
@@ -576,7 +555,7 @@ class DependencyAnalyzerPanel(
                             else -> "Use Latest"
                         }
                         add(label).addActionListener {
-                            mavenAnalyzer.executeManagedUpgradeTarget(option.target, option.latestVersion)
+                            mavenSupport.executeManagedUpgradeTarget(option.target, option.latestVersion)
                             reloadDependencies()
                         }
                     }

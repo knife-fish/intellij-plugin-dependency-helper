@@ -3,7 +3,6 @@ package org.knifefish.dependency.helper.services
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.command.WriteCommandAction
-import com.intellij.openapi.components.Service
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.OpenFileDescriptor
 import com.intellij.openapi.project.Project
@@ -23,13 +22,12 @@ import org.knifefish.dependency.helper.model.DependencyCoordinate
 import org.knifefish.dependency.helper.model.Ecosystem
 import org.knifefish.dependency.helper.model.MavenDependencyNodeView
 
-@Service(Service.Level.PROJECT)
-class MavenDependencyAnalyzer(private val project: Project) {
+class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
 
     private val manager: MavenProjectsManager
         get() = MavenProjectsManager.getInstance(project)
 
-    fun enrichDependencies(file: VirtualFile, dependencies: List<DependencyCoordinate>): List<DependencyCoordinate> {
+    override fun enrichDependencies(file: VirtualFile, dependencies: List<DependencyCoordinate>): List<DependencyCoordinate> {
         if (file.name != "pom.xml") {
             return dependencies
         }
@@ -46,7 +44,7 @@ class MavenDependencyAnalyzer(private val project: Project) {
         }
     }
 
-    fun analyze(): List<MavenDependencyNodeView> {
+    override fun analyze(): List<MavenDependencyNodeView> {
         return ReadAction.compute<List<MavenDependencyNodeView>, RuntimeException> {
             manager.projects.map { projectNode ->
                 val directDependencies = directDependenciesByKey(projectNode)
@@ -55,7 +53,7 @@ class MavenDependencyAnalyzer(private val project: Project) {
         }
     }
 
-    fun toDependencyCoordinate(view: MavenDependencyNodeView): DependencyCoordinate {
+    override fun toDependencyCoordinate(view: MavenDependencyNodeView): DependencyCoordinate {
         return view.sourceDependency ?: DependencyCoordinate(
             ecosystem = Ecosystem.MAVEN,
             group = view.groupId,
@@ -70,7 +68,7 @@ class MavenDependencyAnalyzer(private val project: Project) {
         )
     }
 
-    fun jumpToSource(view: MavenDependencyNodeView): Boolean {
+    override fun jumpToSource(view: MavenDependencyNodeView): Boolean {
         val source = view.sourceDependency
         if (source != null) {
             return openFile(source.file, source.lineNumber)
@@ -78,7 +76,7 @@ class MavenDependencyAnalyzer(private val project: Project) {
         return openParentPom(view) || openReactorPom(view)
     }
 
-    fun exclude(view: MavenDependencyNodeView): Boolean {
+    override fun exclude(view: MavenDependencyNodeView): Boolean {
         if (view.path.size < 3) {
             return false
         }
@@ -137,7 +135,7 @@ class MavenDependencyAnalyzer(private val project: Project) {
         return true
     }
 
-    fun upgradeManagedDependency(dependency: DependencyCoordinate, latestVersion: String): Boolean {
+    override fun upgradeManagedDependency(dependency: DependencyCoordinate, latestVersion: String): Boolean {
         return executeManagedUpgradeTarget(
             discoverManagedUpgradeTargets(dependency).firstOrNull { it.kind == ManagedUpgradeTargetKind.CURRENT }
                 ?: return insertManagedVersion(dependency, latestVersion),
@@ -145,7 +143,7 @@ class MavenDependencyAnalyzer(private val project: Project) {
         )
     }
 
-    fun resolveManagedUpgradeOptions(dependency: DependencyCoordinate): List<ManagedUpgradeOption> {
+    override fun resolveManagedUpgradeOptions(dependency: DependencyCoordinate): List<ManagedUpgradeOption> {
         val repositories = project.dependencyInsightService().repositoriesFor(Ecosystem.MAVEN)
         return discoverManagedUpgradeTargets(dependency).mapNotNull { target ->
             val latest = when (target.kind) {
@@ -203,7 +201,7 @@ class MavenDependencyAnalyzer(private val project: Project) {
         }
     }
 
-    fun executeManagedUpgradeTarget(target: ManagedUpgradeTarget, latestVersion: String): Boolean {
+    override fun executeManagedUpgradeTarget(target: ManagedUpgradeTarget, latestVersion: String): Boolean {
         return when (target.kind) {
             ManagedUpgradeTargetKind.CURRENT -> insertManagedVersion(
                 DependencyCoordinate(
@@ -517,7 +515,7 @@ class MavenDependencyAnalyzer(private val project: Project) {
         return LocalFileSystem.getInstance().findFileByNioFile(pomPath)
     }
 
-    fun refreshMavenProject(file: VirtualFile, afterRefresh: (() -> Unit)? = null) {
+    override fun refreshMavenProject(file: VirtualFile, afterRefresh: (() -> Unit)?) {
         val mavenProject = ReadAction.compute<MavenProject?, RuntimeException> { manager.findProject(file) } ?: run {
             afterRefresh?.invoke()
             return

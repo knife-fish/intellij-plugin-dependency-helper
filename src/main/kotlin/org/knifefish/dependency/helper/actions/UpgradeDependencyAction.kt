@@ -4,10 +4,9 @@ import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
-import com.intellij.openapi.components.service
 import com.intellij.openapi.ui.Messages
 import org.knifefish.dependency.helper.model.Ecosystem
-import org.knifefish.dependency.helper.services.MavenDependencyAnalyzer
+import org.knifefish.dependency.helper.services.MavenSupport
 import org.knifefish.dependency.helper.services.dependencyInsightService
 
 class UpgradeDependencyAction : AnAction() {
@@ -32,7 +31,7 @@ class UpgradeDependencyAction : AnAction() {
             return
         }
         if (dependency.ecosystem == Ecosystem.MAVEN && dependency.usesManagedVersion) {
-            project.service<MavenDependencyAnalyzer>().upgradeManagedDependency(dependency, latest)
+            project.getService(MavenSupport::class.java)?.upgradeManagedDependency(dependency, latest)
         } else {
             project.dependencyInsightService().upgradeDependency(dependency, latest)
         }

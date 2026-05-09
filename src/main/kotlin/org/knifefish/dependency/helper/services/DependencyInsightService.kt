@@ -1,12 +1,12 @@
 package org.knifefish.dependency.helper.services
 
+import com.intellij.codeInsight.daemon.DaemonCodeAnalyzer
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
 import com.intellij.openapi.diagnostic.thisLogger
-import com.intellij.codeInsight.daemon.DaemonCodeAnalyzer
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.FileEditorManager
@@ -15,15 +15,7 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.project.guessProjectDir
 import com.intellij.openapi.vfs.VfsUtilCore
 import com.intellij.openapi.vfs.VirtualFile
-import org.knifefish.dependency.helper.model.DependencyCoordinate
-import org.knifefish.dependency.helper.model.DependencyLookupResult
-import org.knifefish.dependency.helper.model.DependencySnapshot
-import org.knifefish.dependency.helper.model.Ecosystem
-import org.knifefish.dependency.helper.model.LatestVersionPolicy
-import org.knifefish.dependency.helper.model.PackageSearchResult
-import org.knifefish.dependency.helper.model.RepositorySpec
-import org.knifefish.dependency.helper.model.TextRangeMarker
-import org.knifefish.dependency.helper.model.VersionInfo
+import org.knifefish.dependency.helper.model.*
 import org.knifefish.dependency.helper.repository.ProjectRepositoryResolver
 import org.knifefish.dependency.helper.scanner.DependencyFileScanner
 import java.util.concurrent.ConcurrentHashMap
@@ -34,7 +26,6 @@ class DependencyInsightService(private val project: Project) {
     private val scanner = DependencyFileScanner()
     private val indexClient = PackageIndexClient()
     private val cache = ConcurrentHashMap<String, CachedVersion>()
-    private val mavenAnalyzer by lazy { project.service<MavenDependencyAnalyzer>() }
     @Volatile
     private var latestVersionPolicy: LatestVersionPolicy = LatestVersionPolicy.RELEASE_ONLY
 
@@ -59,7 +50,9 @@ class DependencyInsightService(private val project: Project) {
     fun scanFile(file: VirtualFile): List<DependencyCoordinate> =
         ReadAction.compute<List<DependencyCoordinate>, RuntimeException> {
             readText(file)?.let { text ->
-                mavenAnalyzer.enrichDependencies(file, scanner.scan(file, text))
+                val scanned = scanner.scan(file, text)
+                val mavenSupport = project.getService(MavenSupport::class.java)
+                if (file.name == "pom.xml" && mavenSupport != null) mavenSupport.enrichDependencies(file, scanned) else scanned
             } ?: emptyList()
         }
 
@@ -153,11 +146,11 @@ class DependencyInsightService(private val project: Project) {
     fun upgradeDependency(dependency: DependencyCoordinate, newVersion: String): Boolean {
         val document = FileDocumentManager.getInstance().getDocument(dependency.file) ?: return false
         if (dependency.ecosystem == Ecosystem.MAVEN && dependency.usesManagedVersion) {
-            val inserted = mavenAnalyzer.insertManagedVersion(dependency, newVersion)
-            if (!inserted) {
+            val upgraded = project.getService(MavenSupport::class.java)?.upgradeManagedDependency(dependency, newVersion)
+            if (upgraded != true) {
                 return false
             }
-            mavenAnalyzer.refreshMavenProject(dependency.file) {
+            project.getService(MavenSupport::class.java)?.refreshMavenProject(dependency.file) {
                 refreshEditorsForFile(dependency.file) { candidate -> sameArtifact(candidate, dependency) }
             }
             return true
@@ -171,7 +164,7 @@ class DependencyInsightService(private val project: Project) {
             FileDocumentManager.getInstance().saveDocument(document)
         })
         if (dependency.ecosystem == Ecosystem.MAVEN) {
-            mavenAnalyzer.refreshMavenProject(dependency.file) {
+            project.getService(MavenSupport::class.java)?.refreshMavenProject(dependency.file) {
                 refreshEditorsForFile(dependency.file) { candidate -> sameArtifact(candidate, dependency) }
             }
         } else {
@@ -206,7 +199,12 @@ class DependencyInsightService(private val project: Project) {
         currentText: String,
         newVersion: String,
     ): DeclarationReplacement? {
-        val currentDependencies = mavenAnalyzer.enrichDependencies(dependency.file, scanner.scan(dependency.file, currentText))
+        val scanned = scanner.scan(dependency.file, currentText)
+        val currentDependencies = if (dependency.file.name == "pom.xml") {
+            project.getService(MavenSupport::class.java)?.enrichDependencies(dependency.file, scanned) ?: scanned
+        } else {
+            scanned
+        }
         val target = currentDependencies
             .filter { candidate ->
                 candidate.ecosystem == dependency.ecosystem &&

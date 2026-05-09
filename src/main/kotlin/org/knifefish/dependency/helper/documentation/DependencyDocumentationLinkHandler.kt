@@ -1,10 +1,11 @@
 package org.knifefish.dependency.helper.documentation
 
 import com.intellij.openapi.application.invokeLater
+import com.intellij.openapi.components.service
 import com.intellij.platform.backend.documentation.DocumentationLinkHandler
 import com.intellij.platform.backend.documentation.DocumentationTarget
 import com.intellij.platform.backend.documentation.LinkResolveResult
-import org.knifefish.dependency.helper.services.MavenDependencyAnalyzer
+import org.knifefish.dependency.helper.services.MavenSupport
 import org.knifefish.dependency.helper.services.dependencyInsightService
 
 class DependencyDocumentationLinkHandler : DocumentationLinkHandler {
@@ -28,7 +29,7 @@ class DependencyDocumentationLinkHandler : DocumentationLinkHandler {
                 .ifBlank { "current" }
             val option = lookup.managedOptions.firstOrNull { it.target.id == targetId }
             if (option != null) {
-                project.getService(MavenDependencyAnalyzer::class.java)
+                project.service<MavenSupport>()
                     .executeManagedUpgradeTarget(option.target, option.latestVersion)
             } else {
                 project.dependencyInsightService().upgradeDependency(lookup.dependency, latest)

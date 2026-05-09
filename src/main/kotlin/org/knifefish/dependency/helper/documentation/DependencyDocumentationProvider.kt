@@ -2,29 +2,23 @@ package org.knifefish.dependency.helper.documentation
 
 import com.intellij.ide.DataManager
 import com.intellij.lang.documentation.DocumentationProviderEx
+import com.intellij.openapi.actionSystem.*
+import com.intellij.openapi.actionSystem.ex.ActionUtil
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.application.invokeLater
-import com.intellij.openapi.actionSystem.ActionManager
-import com.intellij.openapi.actionSystem.AnActionEvent
-import com.intellij.openapi.actionSystem.ActionPlaces
-import com.intellij.openapi.actionSystem.ActionUiKind
-import com.intellij.openapi.actionSystem.IdeActions
-import com.intellij.openapi.actionSystem.ex.ActionUtil
+import com.intellij.openapi.components.service
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.editor.LogicalPosition
 import com.intellij.openapi.util.Key
 import com.intellij.openapi.vfs.LocalFileSystem
-import com.intellij.psi.PsiDocumentManager
-import com.intellij.psi.PsiElement
-import com.intellij.psi.PsiFile
-import com.intellij.psi.PsiFileSystemItem
-import com.intellij.psi.PsiManager
-import org.knifefish.dependency.helper.toolWindow.DependencyUpgradeHtmlRenderer
+import com.intellij.psi.*
 import org.knifefish.dependency.helper.model.DependencyCoordinate
 import org.knifefish.dependency.helper.model.DependencyLookupResult
 import org.knifefish.dependency.helper.services.ManagedUpgradeOption
+import org.knifefish.dependency.helper.services.MavenSupport
 import org.knifefish.dependency.helper.services.dependencyInsightService
+import org.knifefish.dependency.helper.toolWindow.DependencyUpgradeHtmlRenderer
 import java.awt.Point
 import java.nio.file.Path
 import java.nio.file.Paths
@@ -82,7 +76,7 @@ class DependencyDocumentationProvider : DocumentationProviderEx() {
                 .ifBlank { "current" }
             val option = lookup.managedOptions.firstOrNull { it.target.id == targetId }
             if (option != null) {
-                project.getService(org.knifefish.dependency.helper.services.MavenDependencyAnalyzer::class.java)
+                project.service<MavenSupport>()
                     .executeManagedUpgradeTarget(option.target, option.latestVersion)
             } else {
                 project.dependencyInsightService().upgradeDependency(lookup.dependency, latest)
@@ -105,7 +99,7 @@ class DependencyDocumentationProvider : DocumentationProviderEx() {
                     val originalElement = findOriginalElement(psiFile, result.dependency) ?: psiFile
                     val metadataPsi = resolveMetadataPsi(project, result.dependency)
                     val managedOptions = if (result.dependency.usesManagedVersion) {
-                        project.getService(org.knifefish.dependency.helper.services.MavenDependencyAnalyzer::class.java)
+                        project.service<MavenSupport>()
                             .resolveManagedUpgradeOptions(result.dependency)
                     } else {
                         emptyList()
