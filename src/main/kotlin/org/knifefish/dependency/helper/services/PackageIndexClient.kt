@@ -1,19 +1,8 @@
 package org.knifefish.dependency.helper.services
 
 import com.intellij.openapi.diagnostic.thisLogger
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
-import org.knifefish.dependency.helper.model.DependencyCoordinate
-import org.knifefish.dependency.helper.model.Ecosystem
-import org.knifefish.dependency.helper.model.LatestVersionPolicy
-import org.knifefish.dependency.helper.model.LookupStatus
-import org.knifefish.dependency.helper.model.PackageSearchResult
-import org.knifefish.dependency.helper.model.RepositorySpec
-import org.knifefish.dependency.helper.model.VersionInfo
+import kotlinx.serialization.json.*
+import org.knifefish.dependency.helper.model.*
 import org.knifefish.dependency.helper.util.VersionComparator
 import java.net.URI
 import java.net.URLEncoder
@@ -25,7 +14,6 @@ import java.time.Duration
 import java.time.LocalDateTime
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
-import java.time.format.DateTimeParseException
 
 class PackageIndexClient {
 
@@ -35,6 +23,7 @@ class PackageIndexClient {
         .build()
 
     private val json = Json { ignoreUnknownKeys = true }
+    private val descendingVersionComparator = Comparator<String> { left, right -> VersionComparator.compare(left, right) }.reversed()
 
     fun findLatestVersion(
         dependency: DependencyCoordinate,
@@ -75,6 +64,32 @@ class PackageIndexClient {
             Ecosystem.PYTHON -> searchPython(query)
             Ecosystem.RUST -> searchRust(query)
         }
+    }
+
+    fun availableVersions(
+        ecosystem: Ecosystem,
+        group: String?,
+        name: String,
+        repositories: List<RepositorySpec>,
+    ): List<String> {
+        val orderedRepositories = repositories.ifEmpty { listOf(defaultRepository(ecosystem)) }
+        orderedRepositories.forEach { repository ->
+            val versions = runCatching {
+                when (ecosystem) {
+                    Ecosystem.MAVEN, Ecosystem.GRADLE -> availableMavenVersions(repository, group, name)
+                    Ecosystem.NPM -> availableNpmVersions(repository, name)
+                    Ecosystem.PYTHON -> availablePythonVersions(repository, name)
+                    Ecosystem.RUST -> availableRustVersions(repository, name)
+                }
+            }.getOrElse {
+                thisLogger().warn("Version list lookup failed for ${repository.url}", it)
+                emptyList()
+            }
+            if (versions.isNotEmpty()) {
+                return versions
+            }
+        }
+        return emptyList()
     }
 
     private fun searchMaven(query: String, repositories: List<RepositorySpec>): List<PackageSearchResult> {
@@ -356,6 +371,21 @@ class PackageIndexClient {
         }
     }
 
+    private fun availableMavenVersions(repository: RepositorySpec, groupId: String?, artifactId: String): List<String> {
+        if (groupId.isNullOrBlank()) {
+            return emptyList()
+        }
+        val metadataUrl = "${repository.url}${groupId.replace('.', '/')}/$artifactId/maven-metadata.xml"
+        val body = get(metadataUrl)
+        return Regex("<version>([^<]+)</version>")
+            .findAll(body)
+            .map { it.groupValues[1] }
+            .distinct()
+            .sortedWith(descendingVersionComparator)
+            .take(30)
+            .toList()
+    }
+
     private fun fetchLatestNpmVersion(repository: RepositorySpec, packageName: String): VersionInfo {
         val url = "${repository.url.trimEnd('/')}/${encodeNpmPackage(packageName)}"
         return runCatching {
@@ -370,6 +400,15 @@ class PackageIndexClient {
         }.getOrElse { error ->
             mapFailure(repository.url, error)
         }
+    }
+
+    private fun availableNpmVersions(repository: RepositorySpec, packageName: String): List<String> {
+        val url = "${repository.url.trimEnd('/')}/${encodeNpmPackage(packageName)}"
+        val body = get(url)
+        return json.parseToJsonElement(body).jsonObject["versions"]?.jsonObject?.keys
+            ?.sortedWith(descendingVersionComparator)
+            ?.take(30)
+            ?: emptyList()
     }
 
     private fun fetchLatestPythonVersion(repository: RepositorySpec, packageName: String): VersionInfo {
@@ -410,6 +449,17 @@ class PackageIndexClient {
         }
     }
 
+    private fun availablePythonVersions(repository: RepositorySpec, packageName: String): List<String> {
+        val base = repository.url.trimEnd('/')
+        val jsonUrl = if (base.endsWith("/simple")) "${base.removeSuffix("/simple")}/pypi/$packageName/json" else "$base/pypi/$packageName/json"
+        val body = get(jsonUrl)
+        return json.parseToJsonElement(body).jsonObject["releases"]?.jsonObject?.keys
+            ?.toList()
+            ?.sortedWith(descendingVersionComparator)
+            ?.take(30)
+            ?: emptyList()
+    }
+
     private fun fetchLatestRustVersion(repository: RepositorySpec, packageName: String): VersionInfo {
         val url = "${repository.url.trimEnd('/')}/api/v1/crates/${encode(packageName)}"
         return runCatching {
@@ -422,6 +472,16 @@ class PackageIndexClient {
         }.getOrElse { error ->
             mapFailure(repository.url, error)
         }
+    }
+
+    private fun availableRustVersions(repository: RepositorySpec, packageName: String): List<String> {
+        val url = "${repository.url.trimEnd('/')}/api/v1/crates/${encode(packageName)}/versions"
+        val body = get(url)
+        return json.parseToJsonElement(body).jsonObject["versions"]?.jsonArray
+            ?.mapNotNull { content(it.jsonObject["num"]) }
+            ?.sortedWith(descendingVersionComparator)
+            ?.take(30)
+            ?: emptyList()
     }
 
     private fun applyPolicy(info: VersionInfo, policy: LatestVersionPolicy): VersionInfo {

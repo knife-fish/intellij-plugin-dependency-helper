@@ -20,6 +20,7 @@ import org.knifefish.dependency.helper.model.Ecosystem
 import org.knifefish.dependency.helper.model.LatestVersionPolicy
 import org.knifefish.dependency.helper.model.MavenDependencyNodeView
 import org.knifefish.dependency.helper.model.PackageSearchResult
+import org.knifefish.dependency.helper.scanner.DependencyFileScanner
 import org.knifefish.dependency.helper.services.DependencyInsightService
 import org.knifefish.dependency.helper.services.MavenSupport
 import java.awt.*
@@ -64,11 +65,9 @@ class DependencyAnalyzerPanel(
     private val showSizeCheckbox = JBCheckBox("Show size")
     private val filterField = SearchTextField()
     private val searchField = SearchTextField()
-    private val ecosystemCombo = JComboBox(DefaultComboBoxModel(Ecosystem.entries.toTypedArray()))
     private val latestPolicyCombo = JComboBox(DefaultComboBoxModel(LatestVersionPolicy.entries.toTypedArray()))
     private val analysisSummaryArea = JBTextArea()
     private val analysisRelationTree = JTree(DefaultMutableTreeNode("Dependency Relations"))
-    private val searchDetailArea = JBTextArea()
 
     private val listModel = DefaultListModel<MavenDependencyNodeView>()
     private val dependencyList = JBList(listModel)
@@ -77,18 +76,18 @@ class DependencyAnalyzerPanel(
     private val analysisCard = JPanel(analysisCardLayout)
     private var dependencyTreeHeaderActions: JPanel? = null
 
-    private val searchModel = DefaultListModel<PackageSearchResult>()
-    private val searchList = JBList(searchModel)
+    private val searchRows = mutableListOf<PackageSearchRow>()
+    private val searchResultsPanel = JPanel()
     private val searchDebounceTimer = Timer(1000) { runSearch() }.apply { isRepeats = false }
 
     private var roots: List<MavenDependencyNodeView> = emptyList()
     private var latestVersionByKey: Map<String, String> = emptyMap()
     private var conflictKeys: Set<String> = emptySet()
     private val artifactSizeLabelByCoordinate = mutableMapOf<String, String>()
+    private val dependencyScanner = DependencyFileScanner()
 
     init {
         configureDetailArea(analysisSummaryArea)
-        configureDetailArea(searchDetailArea)
         analysisRelationTree.isRootVisible = false
         analysisRelationTree.cellRenderer = relationTreeRenderer()
 
@@ -229,14 +228,11 @@ class DependencyAnalyzerPanel(
     }
 
     private fun buildSearchPanel(): JPanel {
-        searchList.selectionMode = ListSelectionModel.SINGLE_SELECTION
-        searchList.cellRenderer = searchRenderer()
-        searchList.addListSelectionListener { searchDetailArea.text = searchDetails(searchList.selectedValue) }
+        searchResultsPanel.layout = BoxLayout(searchResultsPanel, BoxLayout.Y_AXIS)
 
         val toolbar = JPanel(BorderLayout()).apply {
             add(JPanel().apply {
                 add(JBLabel("Search"))
-                add(ecosystemCombo)
                 searchField.preferredSize = Dimension(240, searchField.preferredSize.height)
                 searchField.addKeyboardListener(object : KeyAdapter() {
                     override fun keyReleased(e: KeyEvent) {
@@ -254,16 +250,13 @@ class DependencyAnalyzerPanel(
 
         return JPanel(BorderLayout()).apply {
             add(toolbar, BorderLayout.NORTH)
-            add(JSplitPane(JSplitPane.HORIZONTAL_SPLIT,
+            add(
                 JPanel(BorderLayout()).apply {
                     add(JBLabel("Search results"), BorderLayout.NORTH)
-                    add(JBScrollPane(searchList), BorderLayout.CENTER)
+                    add(JBScrollPane(searchResultsPanel), BorderLayout.CENTER)
                 },
-                JPanel(BorderLayout()).apply {
-                    add(JBLabel("Details"), BorderLayout.NORTH)
-                    add(JBScrollPane(searchDetailArea), BorderLayout.CENTER)
-                }
-            ).apply { resizeWeight = 0.45 }, BorderLayout.CENTER)
+                BorderLayout.CENTER,
+            )
         }
     }
 
@@ -511,27 +504,48 @@ class DependencyAnalyzerPanel(
     private fun runSearch() {
         val query = searchField.text.trim()
         if (query.length < 2) {
-            searchModel.clear()
+            searchRows.clear()
+            renderSearchResults()
             return
         }
-        searchModel.clear()
-        val ecosystem = ecosystemCombo.selectedItem as Ecosystem
-        service.searchPackages(ecosystem, query).forEach(searchModel::addElement)
-        if (searchModel.isEmpty()) {
-            searchDetailArea.text = "No search results. For private registries, exact names work best."
+        val ecosystem = currentSearchEcosystem()
+        if (ecosystem == null) {
+            searchRows.clear()
+            renderSearchResults("Open a dependency file first. Search follows the current file type automatically.")
+            return
         }
-    }
-
-    private fun searchDetails(result: PackageSearchResult?): String {
-        if (result == null) {
-            return searchDetailArea.text
+        searchRows.clear()
+        searchRows += service.searchPackages(ecosystem, query).map { result ->
+            PackageSearchRow(
+                result = result,
+                selectedVersion = result.latestVersion.orEmpty(),
+                versions = mutableListOf(result.latestVersion.orEmpty()).apply { removeAll { it.isBlank() } },
+            )
         }
-        return buildString {
-            appendLine("Package: ${result.displayName}")
-            appendLine("Latest version: ${result.latestVersion ?: "unknown"}")
-            appendLine("Repository: ${result.repositoryUrl ?: "unknown"}")
-            appendLine()
-            append(result.description ?: "No description available.")
+        renderSearchResults()
+        if (searchRows.isEmpty()) {
+            renderSearchResults("No search results. For private registries, exact names work best.")
+            return
+        }
+        ApplicationManager.getApplication().executeOnPooledThread {
+            searchRows.forEachIndexed { index, row ->
+                val versions = service.availableVersions(row.result.ecosystem, row.result.group, row.result.name)
+                if (versions.isEmpty()) {
+                    return@forEachIndexed
+                }
+                ApplicationManager.getApplication().invokeLater {
+                    if (index >= searchRows.size) {
+                        return@invokeLater
+                    }
+                    val target = searchRows[index]
+                    target.versions.clear()
+                    target.versions += versions
+                    if (target.selectedVersion.isBlank() || target.selectedVersion !in target.versions) {
+                        target.selectedVersion = target.versions.first()
+                    }
+                    renderSearchResults()
+                }
+            }
         }
     }
 
@@ -539,10 +553,110 @@ class DependencyAnalyzerPanel(
         val query = searchField.text.trim()
         if (query.length < 2) {
             searchDebounceTimer.stop()
-            searchModel.clear()
+            searchRows.clear()
+            renderSearchResults()
             return
         }
         searchDebounceTimer.restart()
+    }
+
+    private fun currentDependencyTargetFile(): com.intellij.openapi.vfs.VirtualFile? {
+        return currentFile ?: com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project)
+            .selectedFiles
+            .firstOrNull { file ->
+                file.name in setOf("pom.xml", "build.gradle", "build.gradle.kts", "package.json", "requirements.txt", "pyproject.toml", "Cargo.toml")
+            }
+    }
+
+    private fun currentSearchEcosystem(): Ecosystem? {
+        return currentDependencyTargetFile()?.let(dependencyScanner::detectEcosystem)
+    }
+
+    private fun addSearchResult(rowIndex: Int) {
+        val row = searchRows.getOrNull(rowIndex) ?: return
+        val targetFile = currentDependencyTargetFile()
+        if (targetFile == null) {
+            Messages.showInfoMessage(project, "Open a dependency file first, then use Add.", "Dependency Helper")
+            return
+        }
+        val version = row.selectedVersion.ifBlank { row.result.latestVersion.orEmpty() }
+        if (version.isBlank()) {
+            Messages.showWarningDialog(project, "No version is available for ${row.result.displayName}.", "Dependency Helper")
+            return
+        }
+        val added = service.addDependency(targetFile, row.result, version)
+        if (!added) {
+            Messages.showWarningDialog(project, "Couldn't add ${row.result.displayName} to ${targetFile.name}.", "Dependency Helper")
+        }
+    }
+
+    private fun renderSearchResults(emptyMessage: String? = null) {
+        searchResultsPanel.removeAll()
+        if (searchRows.isEmpty()) {
+            searchResultsPanel.add(
+                JPanel(BorderLayout()).apply {
+                    border = BorderFactory.createEmptyBorder(12, 12, 12, 12)
+                    add(JBLabel(emptyMessage ?: "Search for a package."), BorderLayout.WEST)
+                },
+            )
+        } else {
+            searchRows.forEachIndexed { index, row ->
+                searchResultsPanel.add(buildSearchRowComponent(index, row))
+            }
+        }
+        searchResultsPanel.revalidate()
+        searchResultsPanel.repaint()
+    }
+
+    private fun buildSearchRowComponent(index: Int, row: PackageSearchRow): JComponent {
+        val summary = buildSearchRowSummary(row)
+        val versionCombo = JComboBox(row.versions.toTypedArray()).apply {
+            preferredSize = Dimension(170, preferredSize.height)
+            selectedItem = row.selectedVersion
+            addActionListener {
+                row.selectedVersion = selectedItem as? String ?: row.selectedVersion
+            }
+        }
+        val addButton = JButton("Add").apply {
+            addActionListener { addSearchResult(index) }
+        }
+        return JPanel(BorderLayout(8, 0)).apply {
+            maximumSize = Dimension(Int.MAX_VALUE, 36)
+            preferredSize = Dimension(preferredSize.width, 36)
+            border = BorderFactory.createMatteBorder(0, 0, 1, 0, JBColor.border())
+            add(summary, BorderLayout.WEST)
+            add(
+                JPanel(FlowLayout(FlowLayout.RIGHT, 6, 0)).apply {
+                    isOpaque = false
+                    add(versionCombo)
+                    add(addButton)
+                },
+                BorderLayout.EAST,
+            )
+        }
+    }
+
+    private fun buildSearchRowSummary(row: PackageSearchRow): JComponent {
+        val nameLabel = JBLabel(row.result.name.ifBlank { row.result.displayName }).apply {
+            font = font.deriveFont(Font.BOLD)
+        }
+        val coordinateLabel = JBLabel(row.result.displayName).apply {
+            foreground = JBColor.GRAY
+        }
+        val line = JPanel().apply {
+            isOpaque = false
+            layout = BoxLayout(this, BoxLayout.X_AXIS)
+            add(nameLabel)
+            if (row.result.displayName.isNotBlank()) {
+                add(Box.createHorizontalStrut(10))
+                add(coordinateLabel)
+            }
+        }
+        return JPanel(GridBagLayout()).apply {
+            isOpaque = false
+            border = BorderFactory.createEmptyBorder(0, 10, 0, 10)
+            add(line)
+        }
     }
 
     private fun showAnalysisPopup(component: Component, x: Int, y: Int) {
@@ -674,19 +788,6 @@ class DependencyAnalyzerPanel(
                 !sel && node.isTestScope -> JBColor(0xB85C00, 0xFFB86C)
                 else -> foreground
             }
-        }
-    }
-
-    private fun searchRenderer() = object : DefaultListCellRenderer() {
-        override fun getListCellRendererComponent(
-            list: JList<*>?,
-            value: Any?,
-            index: Int,
-            isSelected: Boolean,
-            cellHasFocus: Boolean,
-        ) = super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus).apply {
-            val result = value as? PackageSearchResult ?: return@apply
-            text = "${result.displayName} ${result.latestVersion.orEmpty()}".trim()
         }
     }
 
@@ -894,6 +995,12 @@ class DependencyAnalyzerPanel(
 private data class RelationOccurrenceLabel(
     val label: String,
     val path: List<String>,
+)
+
+private data class PackageSearchRow(
+    val result: PackageSearchResult,
+    val versions: MutableList<String>,
+    var selectedVersion: String,
 )
 
 private fun MavenDependencyNodeView.renderText(latest: String?, showGroupId: Boolean, showSize: Boolean, sizeLabel: String?): String {

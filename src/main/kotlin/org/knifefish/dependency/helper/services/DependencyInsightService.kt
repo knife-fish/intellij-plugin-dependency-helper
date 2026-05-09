@@ -15,6 +15,7 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.project.guessProjectDir
 import com.intellij.openapi.vfs.VfsUtilCore
 import com.intellij.openapi.vfs.VirtualFile
+import org.jetbrains.annotations.VisibleForTesting
 import org.knifefish.dependency.helper.model.*
 import org.knifefish.dependency.helper.repository.ProjectRepositoryResolver
 import org.knifefish.dependency.helper.scanner.DependencyFileScanner
@@ -145,6 +146,30 @@ class DependencyInsightService(private val project: Project) {
     fun searchPackages(ecosystem: Ecosystem, query: String): List<PackageSearchResult> {
         val repositories = ProjectRepositoryResolver(project).resolveForProject()[ecosystem].orEmpty()
         return indexClient.search(ecosystem, query, repositories)
+    }
+
+    fun availableVersions(ecosystem: Ecosystem, group: String?, name: String): List<String> {
+        val repositories = ProjectRepositoryResolver(project).resolveForProject()[ecosystem].orEmpty()
+        return indexClient.availableVersions(ecosystem, group, name, repositories)
+    }
+
+    fun addDependency(targetFile: VirtualFile, result: PackageSearchResult, version: String): Boolean {
+        val document = FileDocumentManager.getInstance().getDocument(targetFile) ?: return false
+        val insertion = buildDependencyInsertion(targetFile.name, result, version, document.text) ?: return false
+        WriteCommandAction.runWriteCommandAction(project, Runnable {
+            document.insertString(insertion.offset, insertion.text)
+            FileDocumentManager.getInstance().saveDocument(document)
+        })
+        when (result.ecosystem) {
+            Ecosystem.MAVEN -> project.getService(MavenSupport::class.java)?.refreshMavenProject(targetFile) {
+                refreshEditorsForFile(targetFile)
+            }
+            Ecosystem.GRADLE -> project.getService(GradleSupport::class.java)?.refreshGradleProject(targetFile) {
+                refreshEditorsForFile(targetFile)
+            } ?: refreshEditorsForFile(targetFile)
+            else -> refreshEditorsForFile(targetFile)
+        }
+        return true
     }
 
     fun upgradeDependency(dependency: DependencyCoordinate, newVersion: String): Boolean {
@@ -288,12 +313,62 @@ class DependencyInsightService(private val project: Project) {
         val newDeclaration: String,
     )
 
+    @VisibleForTesting
+    internal fun buildDependencyInsertion(
+        fileName: String,
+        result: PackageSearchResult,
+        version: String,
+        text: String,
+    ): DependencyInsertion? {
+        return when (fileName) {
+            "pom.xml" -> {
+                val anchor = Regex("</dependencies>", RegexOption.IGNORE_CASE).find(text)?.range?.first ?: return null
+                DependencyInsertion(
+                    anchor,
+                    """
+                    
+                        <dependency>
+                            <groupId>${result.group.orEmpty()}</groupId>
+                            <artifactId>${result.name}</artifactId>
+                            <version>$version</version>
+                        </dependency>
+                    """.trimIndent(),
+                )
+            }
+            "build.gradle", "build.gradle.kts" -> {
+                val anchor = Regex("""(?m)^\s*dependencies\s*\{""").find(text)?.range?.last?.plus(1) ?: return null
+                val notation = if (result.group.isNullOrBlank()) result.name else "${result.group}:${result.name}"
+                DependencyInsertion(anchor, "\n    implementation(\"$notation:$version\")")
+            }
+            "package.json" -> {
+                val dependenciesMatch = Regex(""""dependencies"\s*:\s*\{""").find(text) ?: return null
+                val insertOffset = dependenciesMatch.range.last + 1
+                DependencyInsertion(insertOffset, "\n    \"${result.name}\": \"$version\",")
+            }
+            "requirements.txt" -> DependencyInsertion(text.length, if (text.endsWith("\n") || text.isEmpty()) "${result.name}==$version\n" else "\n${result.name}==$version\n")
+            "pyproject.toml" -> {
+                val anchor = Regex("""(?m)^\s*dependencies\s*=\s*\[""").find(text)?.range?.last?.plus(1) ?: return null
+                DependencyInsertion(anchor, "\n    \"${result.name}==$version\",")
+            }
+            "Cargo.toml" -> {
+                val anchor = Regex("""(?ms)^\[dependencies]\s*""").find(text)?.range?.last?.plus(1) ?: return null
+                DependencyInsertion(anchor, "\n${result.name} = \"$version\"")
+            }
+            else -> null
+        }
+    }
+
     private data class CachedVersion(
         val info: VersionInfo,
         val timestamp: Long = System.currentTimeMillis(),
     ) {
         fun isExpired(): Boolean = System.currentTimeMillis() - timestamp > 10 * 60 * 1000
     }
+
+    internal data class DependencyInsertion(
+        val offset: Int,
+        val text: String,
+    )
 }
 
 fun Project.dependencyInsightService(): DependencyInsightService = service()
