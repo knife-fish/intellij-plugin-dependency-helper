@@ -6,6 +6,7 @@ import com.intellij.platform.backend.documentation.DocumentationResult
 import com.intellij.platform.backend.documentation.DocumentationTarget
 import com.intellij.platform.backend.presentation.TargetPresentation
 import com.intellij.psi.PsiElement
+import org.knifefish.dependency.helper.toolWindow.DependencyUpgradeHtmlRenderer
 
 internal class DependencyDocumentationTarget(
     internal val lookup: DependencyDocumentationProvider.DocumentationLookupContext,
@@ -24,7 +25,18 @@ internal class DependencyDocumentationTarget(
         lookup.metadataPsi?.putUserData(DependencyDocumentationProvider.LOOKUP_RESULT_KEY, lookup)
         lookup.originalElement.putUserData(DependencyDocumentationProvider.LOOKUP_RESULT_KEY, lookup)
         val anchor: PsiElement = lookup.metadataPsi ?: lookup.originalElement
-        return createPsiDocumentationTarget(anchor, lookup.originalElement).computeDocumentation()
-            ?: DocumentationResult.documentation("")
+        val native = createPsiDocumentationTarget(anchor, lookup.originalElement).computeDocumentation()
+        if (native != null && lookup.metadataPsi != null) {
+            return native
+        }
+        return DocumentationResult.documentation(
+            DependencyUpgradeHtmlRenderer.documentationMarkup(
+                dependency = lookup.dependency,
+                versionInfo = lookup.versionInfo,
+                latestRule = lookup.latestRule,
+                managedOptions = lookup.managedOptions,
+                path = lookup.metadataPsi?.virtualFile?.path ?: lookup.dependency.file.path,
+            ),
+        )
     }
 }

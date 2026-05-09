@@ -73,6 +73,8 @@ class DependencyFileScanner {
         val regexes = listOf(
             Regex("""(?m)^(\s*)([\w.]+)\s*\(\s*["']([^:"']+):([^:"']+):([^"']+)["']\s*\)"""),
             Regex("""(?m)^(\s*)([\w.]+)\s+["']([^:"']+):([^:"']+):([^"']+)["']"""),
+            Regex("""(?m)^(\s*)([\w.]+)\s*\(\s*["']([^:"']+):([^:"']+)["']\s*\)"""),
+            Regex("""(?m)^(\s*)([\w.]+)\s+["']([^:"']+):([^:"']+)["']"""),
         )
         val results = mutableListOf<DependencyCoordinate>()
         regexes.forEach { regex ->
@@ -80,19 +82,28 @@ class DependencyFileScanner {
                 val configuration = match.groupValues[2]
                 val group = match.groupValues[3]
                 val name = match.groupValues[4]
-                val version = match.groupValues[5]
-                val versionIndex = match.value.lastIndexOf(version)
-                val versionStart = match.range.first + versionIndex
+                val hasVersion = match.groupValues.size > 5
+                val version = if (hasVersion) match.groupValues[5] else ""
+                val versionIndex = if (hasVersion) match.value.lastIndexOf(version) else -1
+                val versionStart = if (hasVersion) match.range.first + versionIndex else -1
+                val displayRange = if (hasVersion) {
+                    TextRangeMarker(versionStart, versionStart + version.length)
+                } else {
+                    val artifactEnd = match.range.first + match.value.lastIndexOf(name) + name.length
+                    TextRangeMarker(artifactEnd, artifactEnd)
+                }
                 results += createDependency(
                     ecosystem = Ecosystem.GRADLE,
                     group = group,
                     name = name,
                     version = version.trim(),
+                    declaredVersion = if (hasVersion) version.trim() else null,
                     scope = configuration,
                     file = file,
                     declaration = match.value.trim(),
-                    lineNumber = lineNumber(text, versionStart),
-                    range = TextRangeMarker(versionStart, versionStart + version.length),
+                    lineNumber = lineNumber(text, if (hasVersion) versionStart else match.range.first),
+                    range = if (hasVersion) TextRangeMarker(versionStart, versionStart + version.length) else null,
+                    displayRange = displayRange,
                     inspectionRange = TextRangeMarker(match.range.first, match.range.last + 1),
                 )
             }

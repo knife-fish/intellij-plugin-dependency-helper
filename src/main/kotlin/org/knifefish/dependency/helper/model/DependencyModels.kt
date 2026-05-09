@@ -121,5 +121,9 @@ data class MavenDependencyNodeView(
         get() = "$groupId:$artifactId:$version"
 
     val isTestScope: Boolean
-        get() = scope.equals("test", ignoreCase = true)
+        get() = scope?.let { value ->
+            value.equals("test", ignoreCase = true) ||
+                value.startsWith("test", ignoreCase = true) ||
+                value.contains("test", ignoreCase = true)
+        } == true
 }

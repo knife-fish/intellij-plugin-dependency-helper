@@ -52,7 +52,8 @@ class DependencyToolWindowFactory : ToolWindowFactory {
 class DependencyAnalyzerPanel(
     private val project: Project,
     private val service: DependencyInsightService,
-    private val mavenSupport: MavenSupport,
+    private val mavenSupport: MavenSupport?,
+    private val currentFile: com.intellij.openapi.vfs.VirtualFile? = null,
 ) : SimpleToolWindowPanel(true, true) {
 
     private val treeModeButton = JRadioButton("Tree", true)
@@ -208,12 +209,17 @@ class DependencyAnalyzerPanel(
         }
 
         val secondRow = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
-            add(conflictOnlyCheckbox)
-            add(hideTestScopeCheckbox)
-            add(showGroupIdCheckbox)
-            add(showSizeCheckbox)
-            add(JBLabel("Latest"))
-            add(latestPolicyCombo)
+            layout = BorderLayout()
+            add(JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
+                add(conflictOnlyCheckbox)
+                add(hideTestScopeCheckbox)
+                add(showGroupIdCheckbox)
+                add(showSizeCheckbox)
+            }, BorderLayout.WEST)
+            add(JPanel(FlowLayout(FlowLayout.RIGHT, 6, 0)).apply {
+                add(JBLabel("Latest"))
+                add(latestPolicyCombo)
+            }, BorderLayout.EAST)
         }
 
         return JPanel(GridLayout(2, 1, 0, 4)).apply {
@@ -262,7 +268,11 @@ class DependencyAnalyzerPanel(
     }
 
     private fun reloadDependencies() {
-        roots = mavenSupport.analyze()
+        roots = if (currentFile != null) {
+            buildFileRoots(currentFile)
+        } else {
+            mavenSupport?.analyze().orEmpty()
+        }
         artifactSizeLabelByCoordinate.clear()
         conflictKeys = flatten(roots)
             .filter { it.path.size > 1 }
@@ -337,9 +347,10 @@ class DependencyAnalyzerPanel(
         }
         ApplicationManager.getApplication().executeOnPooledThread {
             val versions = nodes.associate { node ->
+                val coordinate = nodeCoordinate(node) ?: return@associate node.key to ""
                 val latest = service.lookupLatestVersion(
-                    mavenSupport.toDependencyCoordinate(node),
-                    service.repositoriesFor(Ecosystem.MAVEN),
+                    coordinate,
+                    service.repositoriesFor(coordinate.ecosystem),
                 ).latestStable
                 node.key to (latest ?: "")
             }
@@ -354,10 +365,10 @@ class DependencyAnalyzerPanel(
     private fun useLatestOnSelected() {
         val node = selectedNode() ?: return
         val source = node.sourceDependency ?: return
-        val latest = service.lookupLatestVersion(source, service.repositoriesFor(Ecosystem.MAVEN)).latestStable ?: return
+        val latest = service.lookupLatestVersion(source, service.repositoriesFor(source.ecosystem)).latestStable ?: return
         if (source.usesManagedVersion) {
-            mavenSupport.upgradeManagedDependency(source, latest)
-            mavenSupport.refreshMavenProject(source.file) {
+            mavenSupport?.upgradeManagedDependency(source, latest)
+            mavenSupport?.refreshMavenProject(source.file) {
                 reloadDependencies()
                 analysisSummaryArea.text = "Updated ${node.groupId}:${node.artifactId} to $latest."
             }
@@ -370,14 +381,15 @@ class DependencyAnalyzerPanel(
 
     private fun excludeSelected() {
         val node = selectedNode() ?: return
-        if (mavenSupport.exclude(node)) {
+        if (mavenSupport?.exclude(node) == true) {
             reloadDependencies()
             analysisSummaryArea.text = "Excluded ${node.groupId}:${node.artifactId} from ${node.path.getOrNull(1)}."
         }
     }
 
     private fun jumpToSource() {
-        selectedNode()?.let(mavenSupport::jumpToSource)
+        val node = selectedNode() ?: return
+        mavenSupport?.jumpToSource(node)
     }
 
     private fun selectedNode(): MavenDependencyNodeView? {
@@ -392,10 +404,11 @@ class DependencyAnalyzerPanel(
         if (node == null) {
             return "Select a Maven dependency to inspect dependency path, latest version, source jump, or exclusion options."
         }
-        val coordinate = mavenSupport.toDependencyCoordinate(node)
-        val latest = service.lookupLatestVersion(coordinate, service.repositoriesFor(Ecosystem.MAVEN))
+        val coordinate = nodeCoordinate(node) ?: return "Select a dependency to inspect version and actions."
+        val latest = service.lookupLatestVersion(coordinate, service.repositoriesFor(coordinate.ecosystem))
         return buildString {
             appendLine("Package: ${node.displayName}")
+            appendLine("Ecosystem: ${coordinate.ecosystem.displayName}")
             appendLine("Scope: ${node.scope ?: "-"}")
             appendLine("Owner project: ${node.ownerProjectName}")
             appendLine("Recommended latest: ${latest.latestStable ?: "unavailable"}")
@@ -405,8 +418,10 @@ class DependencyAnalyzerPanel(
             appendLine()
             appendLine("Actions:")
             appendLine("- Right click for Use Latest")
-            appendLine("- Right click for Jump to Source")
-            appendLine("- Right click for Exclude")
+            if (coordinate.ecosystem == Ecosystem.MAVEN) {
+                appendLine("- Right click for Jump to Source")
+                appendLine("- Right click for Exclude")
+            }
         }
     }
 
@@ -533,12 +548,12 @@ class DependencyAnalyzerPanel(
     private fun showAnalysisPopup(component: Component, x: Int, y: Int) {
         val selected = selectedNode() ?: return
         val source = selected.sourceDependency
-        val managedOptions = if (source?.usesManagedVersion == true) {
+        val managedOptions = if (source?.usesManagedVersion == true && mavenSupport != null) {
             mavenSupport.resolveManagedUpgradeOptions(source)
         } else {
             emptyList()
         }
-        val latest = source?.let { service.lookupLatestVersion(it, service.repositoriesFor(Ecosystem.MAVEN)).latestStable }
+        val latest = source?.let { service.lookupLatestVersion(it, service.repositoriesFor(it.ecosystem)).latestStable }
         if (selectedNode() == null) {
             return
         }
@@ -555,15 +570,59 @@ class DependencyAnalyzerPanel(
                             else -> "Use Latest"
                         }
                         add(label).addActionListener {
-                            mavenSupport.executeManagedUpgradeTarget(option.target, option.latestVersion)
+                            mavenSupport?.executeManagedUpgradeTarget(option.target, option.latestVersion)
                             reloadDependencies()
                         }
                     }
                 }
             }
-            add("Jump to Source").addActionListener { jumpToSource() }
-            add("Exclude").addActionListener { excludeSelected() }
+            if (source?.ecosystem == Ecosystem.MAVEN && mavenSupport != null) {
+                add("Jump to Source").addActionListener { jumpToSource() }
+                add("Exclude").addActionListener { excludeSelected() }
+            }
         }.show(component, x, y)
+    }
+
+    private fun buildFileRoots(file: com.intellij.openapi.vfs.VirtualFile): List<MavenDependencyNodeView> {
+        val dependencies = service.scanFile(file)
+        if (dependencies.isEmpty()) {
+            return emptyList()
+        }
+        val projectName = file.name
+        val rootPath = listOf(file.path)
+        val root = MavenDependencyNodeView(
+            ownerProjectName = projectName,
+            ownerProjectFile = file,
+            groupId = "",
+            artifactId = projectName,
+            version = "",
+            scope = "file",
+            packaging = null,
+            path = rootPath,
+            sourceDependency = null,
+        )
+        dependencies.forEach { dependency ->
+            root.children += MavenDependencyNodeView(
+                ownerProjectName = projectName,
+                ownerProjectFile = file,
+                groupId = dependency.group.orEmpty(),
+                artifactId = dependency.name,
+                version = dependency.version,
+                scope = dependency.scope,
+                packaging = null,
+                path = rootPath + dependency.displayName,
+                sourceDependency = dependency,
+            )
+        }
+        return listOf(root)
+    }
+
+    private fun nodeCoordinate(node: MavenDependencyNodeView): org.knifefish.dependency.helper.model.DependencyCoordinate? {
+        return node.sourceDependency ?: if (currentFile == null && mavenSupport != null) {
+            mavenSupport.toDependencyCoordinate(node)
+        } else {
+            null
+        }
     }
 
     private fun popupHandler(showPopup: (MouseEvent) -> Unit) = object : MouseAdapter() {
@@ -728,7 +787,7 @@ class DependencyAnalyzerPanel(
     }
 
     private fun artifactSizeLabel(node: MavenDependencyNodeView): String? {
-        val coordinate = "${node.groupId}:${node.artifactId}:${node.version}:${node.packaging.orEmpty()}"
+        val coordinate = "${node.sourceDependency?.ecosystem?.name.orEmpty()}:${node.groupId}:${node.artifactId}:${node.version}:${node.packaging.orEmpty()}"
         return artifactSizeLabelByCoordinate.getOrPut(coordinate) {
             resolveArtifactSizeLabel(node).orEmpty()
         }.ifBlank { null }
@@ -738,7 +797,7 @@ class DependencyAnalyzerPanel(
         if (node.groupId.isBlank() || node.artifactId.isBlank() || node.version.isBlank()) {
             return null
         }
-        val versionDir = Paths.get(
+        val mavenVersionDir = Paths.get(
             System.getProperty("user.home"),
             ".m2",
             "repository",
@@ -746,12 +805,29 @@ class DependencyAnalyzerPanel(
             node.artifactId,
             node.version,
         )
+        findArtifactPath(mavenVersionDir, node)?.let { return formatSizeKilobytes(Files.size(it)) }
+
+        val gradleVersionDir = Paths.get(
+            System.getProperty("user.home"),
+            ".gradle",
+            "caches",
+            "modules-2",
+            "files-2.1",
+            node.groupId,
+            node.artifactId,
+            node.version,
+        )
+        findArtifactPath(gradleVersionDir, node)?.let { return formatSizeKilobytes(Files.size(it)) }
+        return null
+    }
+
+    private fun findArtifactPath(versionDir: java.nio.file.Path, node: MavenDependencyNodeView): java.nio.file.Path? {
         if (!Files.isDirectory(versionDir)) {
             return null
         }
         val extension = artifactExtension(node.packaging)
         val expectedPrefix = "${node.artifactId}-${node.version}"
-        val artifactPath = Files.list(versionDir).use { stream ->
+        return Files.walk(versionDir).use { stream ->
             stream
                 .filter { candidate ->
                     Files.isRegularFile(candidate) &&
@@ -762,8 +838,7 @@ class DependencyAnalyzerPanel(
                 }
                 .findFirst()
                 .orElse(null)
-        } ?: return null
-        return formatSizeKilobytes(Files.size(artifactPath))
+        }
     }
 
     private fun artifactExtension(packaging: String?): String {

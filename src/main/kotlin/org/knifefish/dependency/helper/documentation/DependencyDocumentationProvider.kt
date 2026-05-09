@@ -15,6 +15,7 @@ import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.psi.*
 import org.knifefish.dependency.helper.model.DependencyCoordinate
 import org.knifefish.dependency.helper.model.DependencyLookupResult
+import org.knifefish.dependency.helper.services.GradleSupport
 import org.knifefish.dependency.helper.services.ManagedUpgradeOption
 import org.knifefish.dependency.helper.services.MavenSupport
 import org.knifefish.dependency.helper.services.dependencyInsightService
@@ -166,13 +167,14 @@ class DependencyDocumentationProvider : DocumentationProviderEx() {
                 return null
             }
             return when (dependency.ecosystem.name) {
-                "MAVEN", "GRADLE" -> Paths.get(
+                "MAVEN" -> Paths.get(
                     org.jetbrains.idea.maven.project.MavenProjectsManager.getInstance(project).repositoryPath.toString(),
                     *group.split('.').toTypedArray(),
                     dependency.name,
                     dependency.version,
                     "${dependency.name}-${dependency.version}.pom",
                 )
+                "GRADLE" -> project.getService(GradleSupport::class.java)?.resolveMetadataPath(dependency)
                 else -> null
             }
         }

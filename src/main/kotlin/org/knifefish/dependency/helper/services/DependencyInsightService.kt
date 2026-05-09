@@ -51,8 +51,12 @@ class DependencyInsightService(private val project: Project) {
         ReadAction.compute<List<DependencyCoordinate>, RuntimeException> {
             readText(file)?.let { text ->
                 val scanned = scanner.scan(file, text)
-                val mavenSupport = project.getService(MavenSupport::class.java)
-                if (file.name == "pom.xml" && mavenSupport != null) mavenSupport.enrichDependencies(file, scanned) else scanned
+                when {
+                    file.name == "pom.xml" -> project.getService(MavenSupport::class.java)?.enrichDependencies(file, scanned) ?: scanned
+                    file.name in setOf("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts") ->
+                        project.getService(GradleSupport::class.java)?.enrichDependencies(file, scanned) ?: scanned
+                    else -> scanned
+                }
             } ?: emptyList()
         }
 
@@ -155,6 +159,15 @@ class DependencyInsightService(private val project: Project) {
             }
             return true
         }
+        if (dependency.ecosystem == Ecosystem.GRADLE) {
+            val upgraded = project.getService(GradleSupport::class.java)?.upgradeDependency(dependency, newVersion)
+            if (upgraded == true) {
+                project.getService(GradleSupport::class.java)?.refreshGradleProject(dependency.file) {
+                    refreshEditorsForFile(dependency.file) { candidate -> sameArtifact(candidate, dependency) }
+                } ?: refreshEditorsForFile(dependency.file) { candidate -> sameArtifact(candidate, dependency) }
+                return true
+            }
+        }
         val replacement = resolveVersionReplacement(dependency, document.text, newVersion) ?: return false
         WriteCommandAction.runWriteCommandAction(project, Runnable {
             if (replacement.range.endOffset > document.textLength) {
@@ -167,6 +180,10 @@ class DependencyInsightService(private val project: Project) {
             project.getService(MavenSupport::class.java)?.refreshMavenProject(dependency.file) {
                 refreshEditorsForFile(dependency.file) { candidate -> sameArtifact(candidate, dependency) }
             }
+        } else if (dependency.ecosystem == Ecosystem.GRADLE) {
+            project.getService(GradleSupport::class.java)?.refreshGradleProject(dependency.file) {
+                refreshEditorsForFile(dependency.file) { candidate -> sameArtifact(candidate, dependency) }
+            } ?: refreshEditorsForFile(dependency.file) { candidate -> sameArtifact(candidate, dependency) }
         } else {
             refreshEditorsForFile(dependency.file) { candidate -> sameArtifact(candidate, dependency) }
         }
@@ -175,7 +192,8 @@ class DependencyInsightService(private val project: Project) {
 
     fun dependencyAt(file: VirtualFile, offset: Int): DependencyCoordinate? =
         scanFile(file).firstOrNull { marker ->
-            marker.versionRange?.let { offset in it.startOffset..it.endOffset } == true
+            marker.versionRange?.let { offset in it.startOffset..it.endOffset } == true ||
+                offset in marker.inspectionRange.startOffset..marker.inspectionRange.endOffset
         }
 
     private fun readText(file: VirtualFile): String? = runCatching {
@@ -200,10 +218,11 @@ class DependencyInsightService(private val project: Project) {
         newVersion: String,
     ): DeclarationReplacement? {
         val scanned = scanner.scan(dependency.file, currentText)
-        val currentDependencies = if (dependency.file.name == "pom.xml") {
-            project.getService(MavenSupport::class.java)?.enrichDependencies(dependency.file, scanned) ?: scanned
-        } else {
-            scanned
+        val currentDependencies = when (dependency.file.name) {
+            "pom.xml" -> project.getService(MavenSupport::class.java)?.enrichDependencies(dependency.file, scanned) ?: scanned
+            "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts" ->
+                project.getService(GradleSupport::class.java)?.enrichDependencies(dependency.file, scanned) ?: scanned
+            else -> scanned
         }
         val target = currentDependencies
             .filter { candidate ->

@@ -1,0 +1,6 @@
+<idea-plugin>
+    <extensions defaultExtensionNs="com.intellij">
+        <projectService serviceInterface="org.knifefish.dependency.helper.services.GradleSupport"
+                        serviceImplementation="org.knifefish.dependency.helper.services.DefaultGradleSupport"/>
+    </extensions>
+</idea-plugin>

@@ -10,10 +10,13 @@
 
     <depends>com.intellij.modules.platform</depends>
     <depends optional="true" config-file="optional-maven.xml">org.jetbrains.idea.maven</depends>
+    <depends optional="true" config-file="optional-gradle.xml">org.jetbrains.plugins.gradle</depends>
 
     <resource-bundle>messages.MyBundle</resource-bundle>
 
     <extensions defaultExtensionNs="com.intellij">
+        <postStartupActivity implementation="org.knifefish.dependency.helper.startup.DependencyProjectActivity" />
+        <fileEditorProvider implementation="org.knifefish.dependency.helper.editor.DependencyAnalyzerFileEditorProvider"/>
     </extensions>
 
     <actions>

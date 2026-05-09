@@ -22,7 +22,8 @@ class DependencyAnalyzerFileEditor(
     private val panel = DependencyAnalyzerPanel(
         project = project,
         service = project.service<DependencyInsightService>(),
-        mavenSupport = requireNotNull(project.getService(MavenSupport::class.java)),
+        mavenSupport = project.getService(MavenSupport::class.java),
+        currentFile = file,
     )
 
     override fun getComponent(): JComponent = panel
