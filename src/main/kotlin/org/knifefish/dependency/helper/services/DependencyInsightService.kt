@@ -54,8 +54,21 @@ class DependencyInsightService(private val project: Project) {
                 val scanned = scanner.scan(file, text)
                 when {
                     file.name == "pom.xml" -> project.getService(MavenSupport::class.java)?.enrichDependencies(file, scanned) ?: scanned
-                    file.name in setOf("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts") ->
-                        project.getService(GradleSupport::class.java)?.enrichDependencies(file, scanned) ?: scanned
+                    file.name in setOf("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts") -> {
+                        val gradleSupport = project.getService(GradleSupport::class.java)
+                        val enriched = gradleSupport?.enrichDependencies(file, scanned) ?: scanned
+                        thisLogger().info(
+                            buildString {
+                                append("DependencyHelper Gradle scanFile: file=${file.path}, gradleSupport=")
+                                append(gradleSupport?.javaClass?.simpleName ?: "null")
+                                append(", scanned=")
+                                append(scanned.joinToString { "${it.declaredVersion ?: it.displayName}=>${it.version.ifBlank { "unknown" }}" })
+                                append(", enriched=")
+                                append(enriched.joinToString { "${it.declaredVersion ?: it.displayName}=>${it.displayName}:${it.version.ifBlank { "unknown" }}" })
+                            },
+                        )
+                        enriched
+                    }
                     else -> scanned
                 }
             } ?: emptyList()

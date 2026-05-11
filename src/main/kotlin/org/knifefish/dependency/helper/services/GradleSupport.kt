@@ -2,9 +2,12 @@ package org.knifefish.dependency.helper.services
 
 import com.intellij.openapi.vfs.VirtualFile
 import org.knifefish.dependency.helper.model.DependencyCoordinate
+import org.knifefish.dependency.helper.model.MavenDependencyNodeView
 import java.nio.file.Path
 
 interface GradleSupport {
+
+    fun analyze(file: VirtualFile): List<MavenDependencyNodeView>
 
     fun enrichDependencies(file: VirtualFile, dependencies: List<DependencyCoordinate>): List<DependencyCoordinate>
 

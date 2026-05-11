@@ -141,11 +141,151 @@ class DependencyFileScannerTest {
                 kotlin_version=2.2.21
                 logback_version=1.5.18
             """.trimIndent(),
+            versionCatalogs = emptyMap(),
             dependencies = scanned,
         )
 
         assertEquals("3.3.2", enriched.first { it.name == "ktor-server-core" }.version)
         assertEquals("1.5.18", enriched.first { it.name == "logback-classic" }.version)
         assertEquals("2.2.21", enriched.first { it.name == "kotlin-test-junit" }.version)
+    }
+
+    @Test
+    fun scansAndEnrichesGradleVersionCatalogAliases() {
+        val text = """
+            dependencies {
+                implementation(libs.logback.classic)
+                testImplementation(libs.kotlin.test.junit)
+            }
+        """.trimIndent()
+        val file = LightVirtualFile("build.gradle.kts", text)
+
+        val scanned = scanner.scan(file, text)
+
+        assertEquals(2, scanned.size)
+        assertEquals("libs.logback.classic", scanned.first { it.name == "classic" }.declaredVersion)
+
+        val enriched = enrichGradleDependencies(
+            buildText = text,
+            gradlePropertiesText = null,
+            versionCatalogs = mapOf(
+                "libs" to org.knifefish.dependency.helper.services.GradleVersionCatalogSource(
+                    "libs",
+                    file,
+                    """
+                        [versions]
+                        logback = "1.5.18"
+                        kotlin = "2.2.21"
+
+                        [libraries]
+                        logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
+                        kotlin-test-junit = { group = "org.jetbrains.kotlin", name = "kotlin-test-junit", version.ref = "kotlin" }
+                    """.trimIndent(),
+                ),
+            ),
+            dependencies = scanned,
+        )
+
+        val logback = enriched.first { it.declaredVersion == "libs.logback.classic" }
+        assertEquals("ch.qos.logback", logback.group)
+        assertEquals("logback-classic", logback.name)
+        assertEquals("1.5.18", logback.version)
+
+        val kotlinTest = enriched.first { it.declaredVersion == "libs.kotlin.test.junit" }
+        assertEquals("org.jetbrains.kotlin", kotlinTest.group)
+        assertEquals("kotlin-test-junit", kotlinTest.name)
+        assertEquals("2.2.21", kotlinTest.version)
+    }
+
+    @Test
+    fun enrichesGradleBundlesAndCustomCatalogs() {
+        val text = """
+            dependencies {
+                implementation(toolset.bundles.ktor)
+            }
+        """.trimIndent()
+        val file = LightVirtualFile("build.gradle.kts", text)
+        val scanned = scanner.scan(file, text)
+
+        val enriched = enrichGradleDependencies(
+            buildText = text,
+            gradlePropertiesText = null,
+            versionCatalogs = mapOf(
+                "toolset" to org.knifefish.dependency.helper.services.GradleVersionCatalogSource(
+                    "toolset",
+                    file,
+                    """
+                        [versions]
+                        ktor = "3.3.2"
+
+                        [libraries]
+                        ktor-server-core = { module = "io.ktor:ktor-server-core", version.ref = "ktor" }
+                        ktor-server-netty = { module = "io.ktor:ktor-server-netty", version.ref = "ktor" }
+
+                        [bundles]
+                        ktor = ["ktor-server-core", "ktor-server-netty"]
+                    """.trimIndent(),
+                ),
+            ),
+            dependencies = scanned,
+        )
+
+        assertEquals(2, enriched.size)
+        assertTrue(enriched.any { it.group == "io.ktor" && it.name == "ktor-server-core" && it.version == "3.3.2" })
+        assertTrue(enriched.any { it.group == "io.ktor" && it.name == "ktor-server-netty" && it.version == "3.3.2" })
+    }
+
+    @Test
+    fun enrichesGradlePluginAliasesFromVersionCatalogs() {
+        val text = """
+            plugins {
+                alias(libs.plugins.kotlin.jvm)
+                alias(ktorLibs.plugins.ktor)
+            }
+        """.trimIndent()
+        val file = LightVirtualFile("build.gradle.kts", text)
+        val scanned = scanner.scan(file, text)
+
+        assertEquals(2, scanned.size)
+
+        val enriched = enrichGradleDependencies(
+            buildText = text,
+            gradlePropertiesText = null,
+            versionCatalogs = mapOf(
+                "libs" to org.knifefish.dependency.helper.services.GradleVersionCatalogSource(
+                    "libs",
+                    file,
+                    """
+                        [versions]
+                        kotlin = "2.2.21"
+
+                        [plugins]
+                        kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+                    """.trimIndent(),
+                ),
+                "ktorLibs" to org.knifefish.dependency.helper.services.GradleVersionCatalogSource(
+                    "ktorLibs",
+                    file,
+                    """
+                        [versions]
+                        ktor = "3.3.2"
+
+                        [plugins]
+                        ktor = { id = "io.ktor.plugin", version.ref = "ktor" }
+                    """.trimIndent(),
+                ),
+            ),
+            dependencies = scanned,
+        )
+
+        val kotlinPlugin = enriched.first { it.declaredVersion == "libs.plugins.kotlin.jvm" }
+        assertNull(kotlinPlugin.group)
+        assertEquals("org.jetbrains.kotlin.jvm", kotlinPlugin.name)
+        assertEquals("2.2.21", kotlinPlugin.version)
+
+        val ktorPlugin = enriched.first { it.declaredVersion == "ktorLibs.plugins.ktor" }
+        assertNull(ktorPlugin.group)
+        assertEquals("io.ktor.plugin", ktorPlugin.name)
+        assertEquals("3.3.2", ktorPlugin.version)
     }
 }

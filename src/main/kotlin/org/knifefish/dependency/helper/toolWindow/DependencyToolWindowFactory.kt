@@ -3,6 +3,8 @@ package org.knifefish.dependency.helper.toolWindow
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.service
+import com.intellij.openapi.diagnostic.thisLogger
+import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.ui.SimpleToolWindowPanel
@@ -22,6 +24,7 @@ import org.knifefish.dependency.helper.model.MavenDependencyNodeView
 import org.knifefish.dependency.helper.model.PackageSearchResult
 import org.knifefish.dependency.helper.scanner.DependencyFileScanner
 import org.knifefish.dependency.helper.services.DependencyInsightService
+import org.knifefish.dependency.helper.services.GradleSupport
 import org.knifefish.dependency.helper.services.MavenSupport
 import java.awt.*
 import java.awt.event.KeyAdapter
@@ -41,7 +44,8 @@ class DependencyToolWindowFactory : ToolWindowFactory {
         val panel = DependencyAnalyzerPanel(
             project = project,
             service = project.service(),
-            mavenSupport = requireNotNull(project.getService(MavenSupport::class.java)),
+            mavenSupport = project.getService(MavenSupport::class.java),
+            gradleSupport = project.getService(GradleSupport::class.java),
         )
         val content = ContentFactory.getInstance().createContent(panel, null, false)
         toolWindow.contentManager.addContent(content)
@@ -54,6 +58,7 @@ class DependencyAnalyzerPanel(
     private val project: Project,
     private val service: DependencyInsightService,
     private val mavenSupport: MavenSupport?,
+    private val gradleSupport: GradleSupport?,
     private val currentFile: com.intellij.openapi.vfs.VirtualFile? = null,
 ) : SimpleToolWindowPanel(true, true) {
 
@@ -139,7 +144,7 @@ class DependencyAnalyzerPanel(
             add(toolbar, BorderLayout.NORTH)
             add(JSplitPane(JSplitPane.HORIZONTAL_SPLIT,
                 JPanel(BorderLayout()).apply {
-                    add(titledPanelHeader("Resolved Maven dependencies", dependencyTree), BorderLayout.NORTH)
+                    add(titledPanelHeader("Resolved dependencies", dependencyTree), BorderLayout.NORTH)
                     add(analysisCard, BorderLayout.CENTER)
                 },
                 JPanel(BorderLayout()).apply {
@@ -261,11 +266,71 @@ class DependencyAnalyzerPanel(
     }
 
     private fun reloadDependencies() {
-        roots = if (currentFile != null) {
-            buildFileRoots(currentFile)
-        } else {
-            mavenSupport?.analyze().orEmpty()
+        val targetFile = currentFile ?: activeDependencyFile()
+        val effectiveTargetFile = resolveGradleDisplayFile(targetFile)
+        thisLogger().info(
+            "DependencyHelper reloadDependencies: currentFile=${currentFile?.path}, targetFile=${targetFile?.path}, " +
+                "effectiveTargetFile=${effectiveTargetFile?.path}, " +
+                "mavenSupport=${mavenSupport?.javaClass?.simpleName ?: "null"}, " +
+                "gradleSupport=${gradleSupport?.javaClass?.simpleName ?: "null"}",
+        )
+        if (effectiveTargetFile != null && effectiveTargetFile.name in setOf("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts")) {
+            thisLogger().info("DependencyHelper reloadDependencies branch: gradleAnalyze-async file=${effectiveTargetFile.path}")
+            ApplicationManager.getApplication().executeOnPooledThread {
+                val resolvedRoots = gradleSupport?.analyze(effectiveTargetFile).orEmpty()
+                    .ifEmpty { buildFileRoots(effectiveTargetFile) }
+                ApplicationManager.getApplication().invokeLater {
+                    thisLogger().info(
+                        "DependencyHelper reloadDependencies gradleAnalyze-async result: file=${effectiveTargetFile.path}, roots=${resolvedRoots.size}, " +
+                            "nodes=${resolvedRoots.joinToString { "${it.artifactId}:${it.children.size}" }}",
+                    )
+                    applyRoots(resolvedRoots)
+                }
+            }
+            return
         }
+        roots = when {
+            effectiveTargetFile?.name == "pom.xml" && mavenSupport != null -> {
+                val pomTarget = requireNotNull(effectiveTargetFile)
+                thisLogger().info("DependencyHelper reloadDependencies branch: mavenAnalyze file=${pomTarget.path}")
+                val analyzedRoots = mavenSupport.analyze()
+                analyzedRoots.filter { it.ownerProjectFile.path == pomTarget.path }
+                    .ifEmpty { buildFileRoots(pomTarget) }
+            }
+            effectiveTargetFile != null -> {
+                thisLogger().info("DependencyHelper reloadDependencies branch: fileRoots file=${effectiveTargetFile.path}")
+                buildFileRoots(effectiveTargetFile)
+            }
+            else -> {
+                thisLogger().info("DependencyHelper reloadDependencies branch: projectMavenAnalyze")
+                mavenSupport?.analyze().orEmpty()
+            }
+        }
+        applyRoots(roots)
+    }
+
+    private fun activeDependencyFile(): com.intellij.openapi.vfs.VirtualFile? {
+        val selectedFile = FileEditorManager.getInstance(project).selectedFiles.firstOrNull() ?: return null
+        thisLogger().info("DependencyHelper activeDependencyFile: selected=${selectedFile.path}, supported=${dependencyScanner.supports(selectedFile)}")
+        return selectedFile.takeIf { dependencyScanner.supports(it) }
+    }
+
+    private fun resolveGradleDisplayFile(file: com.intellij.openapi.vfs.VirtualFile?): com.intellij.openapi.vfs.VirtualFile? {
+        if (file == null || file.name !in setOf("settings.gradle", "settings.gradle.kts")) {
+            return file
+        }
+        val parent = file.parent ?: return file
+        return parent.findChild("build.gradle.kts")
+            ?: parent.findChild("build.gradle")
+            ?: file
+    }
+
+    private fun applyRoots(newRoots: List<MavenDependencyNodeView>) {
+        thisLogger().info(
+            "DependencyHelper applyRoots: roots=${newRoots.size}, " +
+                "nodes=${newRoots.joinToString { "${it.artifactId}:${it.children.size}" }}",
+        )
+        roots = newRoots
         artifactSizeLabelByCoordinate.clear()
         conflictKeys = flatten(roots)
             .filter { it.path.size > 1 }
@@ -280,11 +345,40 @@ class DependencyAnalyzerPanel(
         val filter = filterField.text.trim().lowercase()
         val hideTest = hideTestScopeCheckbox.isSelected
         val conflictOnly = conflictOnlyCheckbox.isSelected
-        val filteredRoots = roots.mapNotNull { filterNode(it, filter, hideTest, conflictOnly) }
+        val displayRoots = normalizeDisplayRoots(roots)
+        val filteredRoots = displayRoots.mapNotNull { filterNode(it, filter, hideTest, conflictOnly) }
+        thisLogger().info(
+            "DependencyHelper refreshAnalysisView: roots=${roots.size}, displayRoots=${displayRoots.size}, filteredRoots=${filteredRoots.size}, " +
+                "filteredDependencyCount=${flatten(filteredRoots).count { it.path.size > 1 }}, " +
+                "treeMode=${treeModeButton.isSelected}, listMode=${listModeButton.isSelected}",
+        )
         rebuildList(filteredRoots)
         rebuildTree(filteredRoots)
-        analysisSummaryArea.text = "Loaded ${flatten(filteredRoots).count { it.path.size > 1 }} Maven dependencies including transitive nodes."
+        val dependencyCount = flatten(filteredRoots).count { it.path.size > 1 }
+        analysisSummaryArea.text = when {
+            currentFile?.name == "pom.xml" && mavenSupport != null ->
+                "Loaded $dependencyCount dependencies including transitive nodes."
+            currentFile?.name in setOf("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts") && gradleSupport != null ->
+                "Loaded $dependencyCount dependencies including transitive nodes."
+            currentFile != null ->
+                "Loaded $dependencyCount declared dependencies from the current file."
+            else ->
+                "Loaded $dependencyCount dependencies including transitive nodes."
+        }
         analysisRelationTree.model = DefaultTreeModel(DefaultMutableTreeNode("Dependency Relations"))
+    }
+
+    private fun normalizeDisplayRoots(nodes: List<MavenDependencyNodeView>): List<MavenDependencyNodeView> {
+        if (nodes.size != 1) {
+            return nodes
+        }
+        val only = nodes.first()
+        val isSyntheticFileRoot =
+            only.groupId.isBlank() &&
+                only.sourceDependency == null &&
+                only.scope == "file" &&
+                only.ownerProjectFile == currentDependencyTargetFile()
+        return if (isSyntheticFileRoot && only.children.isNotEmpty()) only.children else nodes
     }
 
     private fun filterNode(node: MavenDependencyNodeView, filter: String, hideTest: Boolean, conflictOnly: Boolean): MavenDependencyNodeView? {
@@ -304,16 +398,24 @@ class DependencyAnalyzerPanel(
 
     private fun rebuildList(filteredRoots: List<MavenDependencyNodeView>) {
         listModel.clear()
-        flatten(filteredRoots).filter { it.path.size > 1 }.forEach(listModel::addElement)
+        val items = flatten(filteredRoots).filter { it.path.size > 1 }
+        items.forEach(listModel::addElement)
+        thisLogger().info("DependencyHelper rebuildList: items=${items.size}")
     }
 
     private fun rebuildTree(filteredRoots: List<MavenDependencyNodeView>) {
         val root = DefaultMutableTreeNode("root")
         filteredRoots.forEach { root.add(asTreeNode(it)) }
         dependencyTree.model = DefaultTreeModel(root)
-        if (treeModeButton.isSelected) {
+        thisLogger().info("DependencyHelper rebuildTree: topLevel=${root.childCount}")
+        if (treeModeButton.isSelected && shouldAutoExpandTree()) {
             expandAll(dependencyTree)
         }
+    }
+
+    private fun shouldAutoExpandTree(): Boolean {
+        val file = currentDependencyTargetFile() ?: currentFile
+        return file?.name !in setOf("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts")
     }
 
     private fun asTreeNode(view: MavenDependencyNodeView): DefaultMutableTreeNode {
@@ -324,7 +426,11 @@ class DependencyAnalyzerPanel(
 
     private fun flatten(nodes: List<MavenDependencyNodeView>): List<MavenDependencyNodeView> {
         val results = mutableListOf<MavenDependencyNodeView>()
+        val seen = mutableSetOf<List<String>>()
         fun visit(node: MavenDependencyNodeView) {
+            if (!seen.add(node.path)) {
+                return
+            }
             results += node
             node.children.forEach(::visit)
         }
@@ -699,6 +805,10 @@ class DependencyAnalyzerPanel(
 
     private fun buildFileRoots(file: com.intellij.openapi.vfs.VirtualFile): List<MavenDependencyNodeView> {
         val dependencies = service.scanFile(file)
+        thisLogger().info(
+            "DependencyHelper buildFileRoots: file=${file.path}, dependencies=" +
+                dependencies.joinToString { "${it.declaredVersion ?: it.displayName}=>${it.displayName}:${it.version.ifBlank { "unknown" }}" },
+        )
         if (dependencies.isEmpty()) {
             return emptyList()
         }

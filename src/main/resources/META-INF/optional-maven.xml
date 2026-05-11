@@ -3,7 +3,7 @@
         <projectService serviceInterface="org.knifefish.dependency.helper.services.MavenSupport"
                         serviceImplementation="org.knifefish.dependency.helper.services.MavenDependencyAnalyzer"/>
         <toolWindow factoryClass="org.knifefish.dependency.helper.toolWindow.DependencyToolWindowFactory" id="Dependency Helper" anchor="bottom"/>
-        <postStartupActivity implementation="org.knifefish.dependency.helper.startup.MyProjectActivity" />
+        <postStartupActivity implementation="org.knifefish.dependency.helper.startup.MavenProjectActivity" />
         <lang.documentationProvider
                 language="XML"
                 implementationClass="org.knifefish.dependency.helper.documentation.DependencyDocumentationProvider"/>

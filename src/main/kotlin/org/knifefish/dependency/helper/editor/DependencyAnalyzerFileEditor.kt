@@ -9,6 +9,7 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.UserDataHolderBase
 import com.intellij.openapi.vfs.VirtualFile
 import org.knifefish.dependency.helper.services.DependencyInsightService
+import org.knifefish.dependency.helper.services.GradleSupport
 import org.knifefish.dependency.helper.services.MavenSupport
 import org.knifefish.dependency.helper.toolWindow.DependencyAnalyzerPanel
 import java.beans.PropertyChangeListener
@@ -23,6 +24,7 @@ class DependencyAnalyzerFileEditor(
         project = project,
         service = project.service<DependencyInsightService>(),
         mavenSupport = project.getService(MavenSupport::class.java),
+        gradleSupport = project.getService(GradleSupport::class.java),
         currentFile = file,
     )
 
