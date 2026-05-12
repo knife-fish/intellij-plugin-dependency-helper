@@ -1,11 +1,11 @@
 package org.knifefish.dependency.helper.services
 
-import com.intellij.openapi.components.service
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.editor.Inlay
 import com.intellij.openapi.editor.markup.TextAttributes
 import com.intellij.openapi.util.Key
 import com.intellij.ui.JBColor
+import org.knifefish.dependency.helper.DependencyHelperBundle
 import org.knifefish.dependency.helper.documentation.DependencyDocumentationProvider
 import org.knifefish.dependency.helper.model.DependencyLookupResult
 import java.awt.Font
@@ -49,9 +49,9 @@ object DependencyInlayManager {
     private fun buildPresentation(result: DependencyLookupResult): InlayPresentation {
         val latest = result.versionInfo.latestStable
         return when {
-            latest == null -> InlayPresentation("  latest unavailable", false)
-            latest == result.dependency.version -> InlayPresentation("  up to date", false)
-            else -> InlayPresentation("  latest $latest", true)
+            latest == null -> InlayPresentation("  ${DependencyHelperBundle.message("Inlay.LatestUnavailable")}", false)
+            latest == result.dependency.version -> InlayPresentation("  ${DependencyHelperBundle.message("Inlay.UpToDate")}", false)
+            else -> InlayPresentation("  ${DependencyHelperBundle.message("Inlay.Latest", latest)}", true)
         }
     }
 

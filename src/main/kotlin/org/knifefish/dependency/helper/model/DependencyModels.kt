@@ -1,13 +1,17 @@
 package org.knifefish.dependency.helper.model
 
 import com.intellij.openapi.vfs.VirtualFile
+import org.knifefish.dependency.helper.DependencyHelperBundle
 
-enum class Ecosystem(val displayName: String) {
-    MAVEN("Maven"),
-    GRADLE("Gradle"),
-    NPM("Node.js"),
-    PYTHON("Python"),
-    RUST("Rust");
+enum class Ecosystem(private val bundleKey: String) {
+    MAVEN("Ecosystem.Maven"),
+    GRADLE("Ecosystem.Gradle"),
+    NPM("Ecosystem.Npm"),
+    PYTHON("Ecosystem.Python"),
+    RUST("Ecosystem.Rust");
+
+    val displayName: String
+        get() = DependencyHelperBundle.message(bundleKey)
 
     companion object {
         fun fromDisplayName(name: String): Ecosystem? = entries.firstOrNull { it.displayName == name }
@@ -70,9 +74,12 @@ enum class LookupStatus {
     ERROR,
 }
 
-enum class LatestVersionPolicy(val displayName: String) {
-    RELEASE_ONLY("Release only"),
-    INCLUDE_PRERELEASE("Include snapshot/prerelease");
+enum class LatestVersionPolicy(private val bundleKey: String) {
+    RELEASE_ONLY("Latest.Policy.ReleaseOnly"),
+    INCLUDE_PRERELEASE("Latest.Policy.IncludePrerelease");
+
+    val displayName: String
+        get() = DependencyHelperBundle.message(bundleKey)
 
     override fun toString(): String = displayName
 }

@@ -19,6 +19,7 @@ import kotlinx.html.b
 import kotlinx.html.body
 import kotlinx.html.html
 import kotlinx.html.stream.createHTML
+import org.knifefish.dependency.helper.DependencyHelperBundle
 import org.knifefish.dependency.helper.model.Ecosystem
 import org.knifefish.dependency.helper.model.LatestVersionPolicy
 import org.knifefish.dependency.helper.model.MavenDependencyNodeView
@@ -47,16 +48,16 @@ class DependencyAnalyzerPanel(
     private val currentFile: com.intellij.openapi.vfs.VirtualFile? = null,
 ) : SimpleToolWindowPanel(true, true) {
 
-    private val treeModeButton = JRadioButton("Tree", true)
-    private val listModeButton = JRadioButton("List")
-    private val conflictOnlyCheckbox = JBCheckBox("Conflicts only")
-    private val hideTestScopeCheckbox = JBCheckBox("Hide test scope")
-    private val showGroupIdCheckbox = JBCheckBox("Show groupId")
-    private val showSizeCheckbox = JBCheckBox("Show size")
+    private val treeModeButton = JRadioButton(message("Panel.Mode.Tree"), true)
+    private val listModeButton = JRadioButton(message("Panel.Mode.List"))
+    private val conflictOnlyCheckbox = JBCheckBox(message("Panel.Filter.ConflictsOnly"))
+    private val hideTestScopeCheckbox = JBCheckBox(message("Panel.Filter.HideTestScope"))
+    private val showGroupIdCheckbox = JBCheckBox(message("Panel.Filter.ShowGroupId"))
+    private val showSizeCheckbox = JBCheckBox(message("Panel.Filter.ShowSize"))
     private val filterField = SearchTextField()
     private val searchField = SearchTextField()
     private val latestPolicyCombo = ComboBox(CollectionComboBoxModel(LatestVersionPolicy.entries.toList()))
-    private val analysisRelationTree = Tree(DefaultMutableTreeNode("Dependency Relations"))
+    private val analysisRelationTree = Tree(DefaultMutableTreeNode(message("Panel.Relations.Title")))
 
     private val listModel = DefaultListModel<MavenDependencyNodeView>()
     private val dependencyList = JBList(listModel)
@@ -80,8 +81,8 @@ class DependencyAnalyzerPanel(
         analysisRelationTree.cellRenderer = relationTreeRenderer()
 
         val tabs = JBTabbedPane()
-        tabs.add("Package Analysis", buildAnalysisPanel())
-        tabs.add("Package Search", buildSearchPanel())
+        tabs.add(message("Panel.Tab.Analysis"), buildAnalysisPanel())
+        tabs.add(message("Panel.Tab.Search"), buildSearchPanel())
         setContent(tabs)
 
         reloadDependencies()
@@ -127,12 +128,12 @@ class DependencyAnalyzerPanel(
             add(toolbar, BorderLayout.NORTH)
             add(JSplitPane(JSplitPane.HORIZONTAL_SPLIT,
                 JPanel(BorderLayout()).apply {
-                    add(titledPanelHeader("Resolved dependencies", dependencyTree), BorderLayout.NORTH)
+                    add(titledPanelHeader(message("Panel.ResolvedDependencies"), dependencyTree), BorderLayout.NORTH)
                     add(analysisCard, BorderLayout.CENTER)
                 },
                 JPanel(BorderLayout()).apply {
                     add(
-                        titledPanelHeader("Relations", analysisRelationTree),
+                        titledPanelHeader(message("Panel.Relations.Title"), analysisRelationTree),
                         BorderLayout.NORTH,
                     )
                     add(JBScrollPane(analysisRelationTree), BorderLayout.CENTER)
@@ -161,22 +162,22 @@ class DependencyAnalyzerPanel(
 
         val firstRow = JPanel(BorderLayout()).apply {
             add(JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
-                add(JButton("Refresh").apply { addActionListener { reloadDependencies() } })
+                add(JButton(message("Button.Refresh")).apply { addActionListener { reloadDependencies() } })
                 add(treeModeButton)
                 add(listModeButton)
-                add(JBLabel("Filter"))
+                add(JBLabel(message("Label.Filter")))
                 add(filterField)
             }, BorderLayout.WEST)
             add(
                 JPanel(FlowLayout(FlowLayout.RIGHT, 0, 0)).apply {
                     add(
-                        JButton("Donate").apply {
-                            toolTipText = "Support Dependency Helper"
+                        JButton(message("Button.Donate")).apply {
+                            toolTipText = message("Tooltip.Support")
                             addActionListener {
                                 Messages.showInfoMessage(
                                     project,
-                                    "Buy me a coffee: https://buymeacoffee.com/knifefish",
-                                    "Dependency Helper",
+                                    message("Donate.Message"),
+                                    message("Plugin.Name"),
                                 )
                             }
                         },
@@ -195,7 +196,7 @@ class DependencyAnalyzerPanel(
                 add(showSizeCheckbox)
             }, BorderLayout.WEST)
             add(JPanel(FlowLayout(FlowLayout.RIGHT, 6, 0)).apply {
-                add(JBLabel("Latest"))
+                add(JBLabel(message("Label.Latest")))
                 add(latestPolicyCombo)
             }, BorderLayout.EAST)
         }
@@ -211,7 +212,7 @@ class DependencyAnalyzerPanel(
 
         val toolbar = JPanel(BorderLayout()).apply {
             add(JPanel().apply {
-                add(JBLabel("Search"))
+                add(JBLabel(message("Label.Search")))
                 searchField.preferredSize = Dimension(240, searchField.preferredSize.height)
                 searchField.addKeyboardListener(object : KeyAdapter() {
                     override fun keyReleased(e: KeyEvent) {
@@ -231,7 +232,7 @@ class DependencyAnalyzerPanel(
             add(toolbar, BorderLayout.NORTH)
             add(
                 JPanel(BorderLayout()).apply {
-                    add(JBLabel("Search results"), BorderLayout.NORTH)
+                    add(JBLabel(message("Panel.SearchResults")), BorderLayout.NORTH)
                     add(JBScrollPane(searchResultsPanel), BorderLayout.CENTER)
                 },
                 BorderLayout.CENTER,
@@ -331,15 +332,15 @@ class DependencyAnalyzerPanel(
         val dependencyCount = flatten(filteredRoots).count { it.path.size > 1 }
         publishNotification(when {
             currentFile?.name == "pom.xml" && mavenSupport != null ->
-                "Loaded $dependencyCount dependencies including transitive nodes."
+                message("Notification.Loaded.Transitive", dependencyCount)
             currentFile?.name in setOf("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts") && gradleSupport != null ->
-                "Loaded $dependencyCount dependencies including transitive nodes."
+                message("Notification.Loaded.Transitive", dependencyCount)
             currentFile != null ->
-                "Loaded $dependencyCount declared dependencies from the current file."
+                message("Notification.Loaded.Declared", dependencyCount)
             else ->
-                "Loaded $dependencyCount dependencies including transitive nodes."
+                message("Notification.Loaded.Transitive", dependencyCount)
         })
-        analysisRelationTree.model = DefaultTreeModel(DefaultMutableTreeNode("Dependency Relations"))
+        analysisRelationTree.model = DefaultTreeModel(DefaultMutableTreeNode(message("Panel.Relations.Title")))
     }
 
     private fun normalizeDisplayRoots(nodes: List<MavenDependencyNodeView>): List<MavenDependencyNodeView> {
@@ -439,7 +440,7 @@ class DependencyAnalyzerPanel(
         val node = selectedNode() ?: return
         if (mavenSupport?.exclude(node) == true) {
             reloadDependencies()
-            publishNotification("Excluded ${node.groupId}:${node.artifactId} from ${node.path.getOrNull(1)}.")
+            publishNotification(message("Notification.Excluded", "${node.groupId}:${node.artifactId}", node.path.getOrNull(1) ?: ""))
         }
     }
 
@@ -463,7 +464,7 @@ class DependencyAnalyzerPanel(
     }
 
     private fun buildRelationRoot(node: MavenDependencyNodeView?): DefaultMutableTreeNode {
-        val root = DefaultMutableTreeNode("Dependency Relations")
+        val root = DefaultMutableTreeNode(message("Panel.Relations.Title"))
         if (node == null) {
             return root
         }
@@ -548,7 +549,7 @@ class DependencyAnalyzerPanel(
         val ecosystem = currentSearchEcosystem()
         if (ecosystem == null) {
             searchRows.clear()
-            renderSearchResults("Open a dependency file first. Search follows the current file type automatically.")
+            renderSearchResults(message("Panel.Search.OpenDependencyFile"))
             return
         }
         searchRows.clear()
@@ -561,7 +562,7 @@ class DependencyAnalyzerPanel(
         }
         renderSearchResults()
         if (searchRows.isEmpty()) {
-            renderSearchResults("No search results. For private registries, exact names work best.")
+            renderSearchResults(message("Panel.Search.NoResults"))
             return
         }
         ApplicationManager.getApplication().executeOnPooledThread {
@@ -613,17 +614,17 @@ class DependencyAnalyzerPanel(
         val row = searchRows.getOrNull(rowIndex) ?: return
         val targetFile = currentDependencyTargetFile()
         if (targetFile == null) {
-            Messages.showInfoMessage(project, "Open a dependency file first, then use Add.", "Dependency Helper")
+            Messages.showInfoMessage(project, message("Dialog.OpenDependencyFileFirst"), message("Plugin.Name"))
             return
         }
         val version = row.selectedVersion.ifBlank { row.result.latestVersion.orEmpty() }
         if (version.isBlank()) {
-            Messages.showWarningDialog(project, "No version is available for ${row.result.displayName}.", "Dependency Helper")
+            Messages.showWarningDialog(project, message("Dialog.NoVersionAvailable", row.result.displayName), message("Plugin.Name"))
             return
         }
         val added = service.addDependency(targetFile, row.result, version)
         if (!added) {
-            Messages.showWarningDialog(project, "Couldn't add ${row.result.displayName} to ${targetFile.name}.", "Dependency Helper")
+            Messages.showWarningDialog(project, message("Dialog.CouldNotAdd", row.result.displayName, targetFile.name), message("Plugin.Name"))
         }
     }
 
@@ -633,7 +634,7 @@ class DependencyAnalyzerPanel(
             searchResultsPanel.add(
                 JPanel(BorderLayout()).apply {
                     border = BorderFactory.createEmptyBorder(12, 12, 12, 12)
-                    add(JBLabel(emptyMessage ?: "Search for a package."), BorderLayout.WEST)
+                    add(JBLabel(emptyMessage ?: message("Panel.Search.Empty")), BorderLayout.WEST)
                 },
             )
         } else {
@@ -653,7 +654,7 @@ class DependencyAnalyzerPanel(
                 row.selectedVersion = selectedItem as? String ?: row.selectedVersion
             }
         }
-        val addButton = JButton("Add").apply {
+        val addButton = JButton(message("Button.Add")).apply {
             addActionListener { addSearchResult(index) }
         }
         return JPanel(BorderLayout(8, 0)).apply {
@@ -714,10 +715,10 @@ class DependencyAnalyzerPanel(
                 } else {
                     managedOptions.forEach { option ->
                         val label = when (option.target.kind.name) {
-                            "CURRENT" -> "Use Latest"
-                            "PARENT" -> "Use Latest via Parent (${option.latestVersion})"
-                            "BOM" -> "Use Latest via BOM (${option.latestVersion})"
-                            else -> "Use Latest"
+                            "CURRENT" -> message("Popup.UseLatest")
+                            "PARENT" -> message("Popup.UseLatestViaParent", option.latestVersion)
+                            "BOM" -> message("Popup.UseLatestViaBom", option.latestVersion)
+                            else -> message("Popup.UseLatest")
                         }
                         add(label).addActionListener {
                             mavenSupport?.executeManagedUpgradeTarget(option.target, option.latestVersion)
@@ -727,8 +728,8 @@ class DependencyAnalyzerPanel(
                 }
             }
             if (source?.ecosystem == Ecosystem.MAVEN && mavenSupport != null) {
-                add("Jump to Source").addActionListener { jumpToSource() }
-                add("Exclude").addActionListener { excludeSelected() }
+                add(message("Popup.JumpToSource")).addActionListener { jumpToSource() }
+                add(message("Popup.Exclude")).addActionListener { excludeSelected() }
             }
         }.show(component, x, y)
     }
@@ -996,8 +997,8 @@ class DependencyAnalyzerPanel(
 
     private fun titledPanelHeader(title: String, tree: JTree): JPanel {
         val actionsPanel = JPanel(FlowLayout(FlowLayout.RIGHT, 0, 0)).apply {
-            add(iconButton(AllIcons.Actions.Expandall, "Expand all", { expandAll(tree) }))
-            add(iconButton(AllIcons.Actions.Collapseall, "Collapse all", { collapseAll(tree) }))
+            add(iconButton(AllIcons.Actions.Expandall, message("Tooltip.ExpandAll"), { expandAll(tree) }))
+            add(iconButton(AllIcons.Actions.Collapseall, message("Tooltip.CollapseAll"), { collapseAll(tree) }))
         }
         if (tree === dependencyTree) {
             dependencyTreeHeaderActions = actionsPanel
@@ -1023,6 +1024,8 @@ class DependencyAnalyzerPanel(
             addActionListener { action() }
         }
     }
+
+    private fun message(key: String, vararg params: Any): String = DependencyHelperBundle.message(key, *params)
 }
 
 private data class RelationOccurrenceLabel(
@@ -1037,7 +1040,7 @@ private data class PackageSearchRow(
 )
 
 private fun MavenDependencyNodeView.renderHtml(showGroupId: Boolean, latest: String?, showSize: Boolean, sizeLabel: String?): String {
-    val versionText = if (version.isBlank()) "(unknown version)" else version
+    val versionText = if (version.isBlank()) DependencyHelperBundle.message("Text.UnknownVersion") else version
     val latestSuffix = if (!latest.isNullOrBlank() && latest != version) " -> $latest" else ""
     val scopeText = scope?.takeIf { it.isNotBlank() }?.let { " [$it]" }.orEmpty()
     val sizeSuffix = if (showSize && !sizeLabel.isNullOrBlank()) " ($sizeLabel)" else ""

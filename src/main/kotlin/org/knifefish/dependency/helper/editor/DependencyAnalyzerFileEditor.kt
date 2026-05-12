@@ -8,6 +8,7 @@ import com.intellij.openapi.fileEditor.FileEditorStateLevel
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.UserDataHolderBase
 import com.intellij.openapi.vfs.VirtualFile
+import org.knifefish.dependency.helper.DependencyHelperBundle
 import org.knifefish.dependency.helper.services.DependencyInsightService
 import org.knifefish.dependency.helper.services.GradleSupport
 import org.knifefish.dependency.helper.services.MavenSupport
@@ -34,7 +35,7 @@ class DependencyAnalyzerFileEditor(
 
     override fun getFile(): VirtualFile = file
 
-    override fun getName(): String = "Dependency Helper"
+    override fun getName(): String = DependencyHelperBundle.message("Plugin.Name")
 
     override fun setState(state: FileEditorState) = Unit
 

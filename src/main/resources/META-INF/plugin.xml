@@ -12,7 +12,7 @@
     <depends optional="true" config-file="optional-maven.xml">org.jetbrains.idea.maven</depends>
     <depends optional="true" config-file="optional-gradle.xml">org.jetbrains.plugins.gradle</depends>
 
-    <resource-bundle>messages.MyBundle</resource-bundle>
+    <resource-bundle>messages.DependencyHelperBundle</resource-bundle>
 
     <extensions defaultExtensionNs="com.intellij">
         <postStartupActivity implementation="org.knifefish.dependency.helper.startup.DependencyProjectActivity" />
@@ -23,9 +23,9 @@
     <actions>
         <action id="DependencyHelper.RefreshHints"
                 class="org.knifefish.dependency.helper.actions.RefreshDependencyHintsAction"
-                text="Refresh Dependency Hints"/>
+                text="%Action.Refresh"/>
         <action id="DependencyHelper.UpgradeDependency"
                 class="org.knifefish.dependency.helper.actions.UpgradeDependencyAction"
-                text="Upgrade Dependency to Latest Stable"/>
+                text="%Action.Upgrade"/>
     </actions>
 </idea-plugin>

@@ -5,6 +5,7 @@ import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
 import com.intellij.openapi.ui.Messages
+import org.knifefish.dependency.helper.DependencyHelperBundle
 import org.knifefish.dependency.helper.model.Ecosystem
 import org.knifefish.dependency.helper.services.MavenSupport
 import org.knifefish.dependency.helper.services.dependencyInsightService
@@ -17,17 +18,17 @@ class UpgradeDependencyAction : AnAction() {
         val file = e.getData(CommonDataKeys.VIRTUAL_FILE) ?: return
         val dependency = project.dependencyInsightService().dependencyAt(file, editor.caretModel.offset)
         if (dependency == null) {
-            Messages.showInfoMessage(project, "Move the caret onto a dependency version before running upgrade.", "Dependency Helper")
+            Messages.showInfoMessage(project, DependencyHelperBundle.message("Action.Upgrade.NoDependencyAtCaret"), DependencyHelperBundle.message("Plugin.Name"))
             return
         }
         val repositories = project.dependencyInsightService().repositoriesFor(dependency.ecosystem)
         val latest = project.dependencyInsightService().lookupLatestVersion(dependency, repositories).latestStable
         if (latest.isNullOrBlank()) {
-            Messages.showWarningDialog(project, "No latest release version was found for ${dependency.displayName}.", "Dependency Helper")
+            Messages.showWarningDialog(project, DependencyHelperBundle.message("Action.Upgrade.NoLatestFound", dependency.displayName), DependencyHelperBundle.message("Plugin.Name"))
             return
         }
         if (latest == dependency.version) {
-            Messages.showInfoMessage(project, "${dependency.displayName} is already on the latest stable release.", "Dependency Helper")
+            Messages.showInfoMessage(project, DependencyHelperBundle.message("Action.Upgrade.AlreadyLatest", dependency.displayName), DependencyHelperBundle.message("Plugin.Name"))
             return
         }
         if (dependency.ecosystem == Ecosystem.MAVEN && dependency.usesManagedVersion) {
