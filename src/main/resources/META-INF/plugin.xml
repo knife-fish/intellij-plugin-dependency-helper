@@ -17,6 +17,7 @@
     <extensions defaultExtensionNs="com.intellij">
         <postStartupActivity implementation="org.knifefish.dependency.helper.startup.DependencyProjectActivity" />
         <fileEditorProvider implementation="org.knifefish.dependency.helper.editor.DependencyAnalyzerFileEditorProvider"/>
+        <notificationGroup id="Dependency Helper Notifications" displayType="NONE"/>
     </extensions>
 
     <actions>

@@ -1,15 +1,20 @@
 package org.knifefish.dependency.helper.toolWindow
 
 import com.intellij.icons.AllIcons
+import com.intellij.notification.NotificationGroupManager
+import com.intellij.notification.NotificationType
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.diagnostic.thisLogger
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.ui.ComboBox
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.ui.SimpleToolWindowPanel
+import com.intellij.ui.CollectionComboBoxModel
 import com.intellij.ui.JBColor
 import com.intellij.ui.SearchTextField
 import com.intellij.ui.components.*
+import com.intellij.ui.treeStructure.Tree
 import kotlinx.html.b
 import kotlinx.html.body
 import kotlinx.html.html
@@ -50,13 +55,12 @@ class DependencyAnalyzerPanel(
     private val showSizeCheckbox = JBCheckBox("Show size")
     private val filterField = SearchTextField()
     private val searchField = SearchTextField()
-    private val latestPolicyCombo = JComboBox(DefaultComboBoxModel(LatestVersionPolicy.entries.toTypedArray()))
-    private val analysisSummaryArea = JBTextArea()
-    private val analysisRelationTree = JTree(DefaultMutableTreeNode("Dependency Relations"))
+    private val latestPolicyCombo = ComboBox(CollectionComboBoxModel(LatestVersionPolicy.entries.toList()))
+    private val analysisRelationTree = Tree(DefaultMutableTreeNode("Dependency Relations"))
 
     private val listModel = DefaultListModel<MavenDependencyNodeView>()
     private val dependencyList = JBList(listModel)
-    private val dependencyTree = JTree(DefaultMutableTreeNode("root"))
+    private val dependencyTree = Tree(DefaultMutableTreeNode("root"))
     private val analysisCardLayout = CardLayout()
     private val analysisCard = JPanel(analysisCardLayout)
     private var dependencyTreeHeaderActions: JPanel? = null
@@ -72,7 +76,6 @@ class DependencyAnalyzerPanel(
     private val dependencyScanner = DependencyFileScanner()
 
     init {
-        configureDetailArea(analysisSummaryArea)
         analysisRelationTree.isRootVisible = false
         analysisRelationTree.cellRenderer = relationTreeRenderer()
 
@@ -128,20 +131,11 @@ class DependencyAnalyzerPanel(
                     add(analysisCard, BorderLayout.CENTER)
                 },
                 JPanel(BorderLayout()).apply {
-                    add(JBLabel("Details and dependency tree"), BorderLayout.NORTH)
-                    add(JSplitPane(JSplitPane.VERTICAL_SPLIT,
-                        JPanel(BorderLayout()).apply {
-                            add(JBLabel("Summary"), BorderLayout.NORTH)
-                            add(JBScrollPane(analysisSummaryArea), BorderLayout.CENTER)
-                        },
-                        JPanel(BorderLayout()).apply {
-                            add(
-                                titledPanelHeader("Relations", analysisRelationTree),
-                                BorderLayout.NORTH,
-                            )
-                            add(JBScrollPane(analysisRelationTree), BorderLayout.CENTER)
-                        }
-                    ).apply { resizeWeight = 0.38 }, BorderLayout.CENTER)
+                    add(
+                        titledPanelHeader("Relations", analysisRelationTree),
+                        BorderLayout.NORTH,
+                    )
+                    add(JBScrollPane(analysisRelationTree), BorderLayout.CENTER)
                 }
             ).apply { resizeWeight = 0.58 }, BorderLayout.CENTER)
         }
@@ -335,7 +329,7 @@ class DependencyAnalyzerPanel(
         rebuildList(filteredRoots)
         rebuildTree(filteredRoots)
         val dependencyCount = flatten(filteredRoots).count { it.path.size > 1 }
-        analysisSummaryArea.text = when {
+        publishNotification(when {
             currentFile?.name == "pom.xml" && mavenSupport != null ->
                 "Loaded $dependencyCount dependencies including transitive nodes."
             currentFile?.name in setOf("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts") && gradleSupport != null ->
@@ -344,7 +338,7 @@ class DependencyAnalyzerPanel(
                 "Loaded $dependencyCount declared dependencies from the current file."
             else ->
                 "Loaded $dependencyCount dependencies including transitive nodes."
-        }
+        })
         analysisRelationTree.model = DefaultTreeModel(DefaultMutableTreeNode("Dependency Relations"))
     }
 
@@ -441,28 +435,11 @@ class DependencyAnalyzerPanel(
         }
     }
 
-    private fun useLatestOnSelected() {
-        val node = selectedNode() ?: return
-        val source = node.sourceDependency ?: return
-        val latest = service.lookupLatestVersion(source, service.repositoriesFor(source.ecosystem)).latestStable ?: return
-        if (source.usesManagedVersion) {
-            mavenSupport?.upgradeManagedDependency(source, latest)
-            mavenSupport?.refreshMavenProject(source.file) {
-                reloadDependencies()
-                analysisSummaryArea.text = "Updated ${node.groupId}:${node.artifactId} to $latest."
-            }
-        } else {
-            service.upgradeDependency(source, latest)
-            reloadDependencies()
-            analysisSummaryArea.text = "Updated ${node.groupId}:${node.artifactId} to $latest."
-        }
-    }
-
     private fun excludeSelected() {
         val node = selectedNode() ?: return
         if (mavenSupport?.exclude(node) == true) {
             reloadDependencies()
-            analysisSummaryArea.text = "Excluded ${node.groupId}:${node.artifactId} from ${node.path.getOrNull(1)}."
+            publishNotification("Excluded ${node.groupId}:${node.artifactId} from ${node.path.getOrNull(1)}.")
         }
     }
 
@@ -479,33 +456,7 @@ class DependencyAnalyzerPanel(
         }
     }
 
-    private fun analysisDetails(node: MavenDependencyNodeView?): String {
-        if (node == null) {
-            return "Select a Maven dependency to inspect dependency path, latest version, source jump, or exclusion options."
-        }
-        val coordinate = nodeCoordinate(node) ?: return "Select a dependency to inspect version and actions."
-        val latest = service.lookupLatestVersion(coordinate, service.repositoriesFor(coordinate.ecosystem))
-        return buildString {
-            appendLine("Package: ${node.displayName}")
-            appendLine("Ecosystem: ${coordinate.ecosystem.displayName}")
-            appendLine("Scope: ${node.scope ?: "-"}")
-            appendLine("Owner project: ${node.ownerProjectName}")
-            appendLine("Recommended latest: ${latest.latestStable ?: "unavailable"}")
-            appendLine("Latest available: ${latest.latestAvailable ?: latest.latestStable ?: "unavailable"}")
-            appendLine("Latest rule: ${service.latestVersionPolicy().displayName}")
-            appendLine("Version source: ${if (node.sourceDependency?.usesManagedVersion == true) "managed by parent/BOM" else "declared or resolved"}")
-            appendLine()
-            appendLine("Actions:")
-            appendLine("- Right click for Use Latest")
-            if (coordinate.ecosystem == Ecosystem.MAVEN) {
-                appendLine("- Right click for Jump to Source")
-                appendLine("- Right click for Exclude")
-            }
-        }
-    }
-
     private fun updateAnalysisDetails(node: MavenDependencyNodeView?) {
-        analysisSummaryArea.text = analysisDetails(node)
         analysisRelationTree.model = DefaultTreeModel(buildRelationRoot(node))
         collapseAll(analysisRelationTree)
         expandSelectedRelationBranch(node)
@@ -696,9 +647,8 @@ class DependencyAnalyzerPanel(
 
     private fun buildSearchRowComponent(index: Int, row: PackageSearchRow): JComponent {
         val summary = buildSearchRowSummary(row)
-        val versionCombo = JComboBox(row.versions.toTypedArray()).apply {
+        val versionCombo = ComboBox(CollectionComboBoxModel(row.versions, row.selectedVersion)).apply {
             preferredSize = Dimension(170, preferredSize.height)
-            selectedItem = row.selectedVersion
             addActionListener {
                 row.selectedVersion = selectedItem as? String ?: row.selectedVersion
             }
@@ -907,10 +857,12 @@ class DependencyAnalyzerPanel(
         }
     }
 
-    private fun configureDetailArea(area: JBTextArea) {
-        area.isEditable = false
-        area.lineWrap = true
-        area.wrapStyleWord = true
+    private fun publishNotification(message: String) {
+        if (message.isBlank()) return
+        NotificationGroupManager.getInstance()
+            .getNotificationGroup("Dependency Helper Notifications")
+            .createNotification(message, NotificationType.INFORMATION)
+            .notify(project)
     }
 
     private fun repaintDependencyViews() {
@@ -922,15 +874,6 @@ class DependencyAnalyzerPanel(
     private fun switchAnalysisMode(treeMode: Boolean) {
         analysisCardLayout.show(analysisCard, if (treeMode) "tree" else "list")
         dependencyTreeHeaderActions?.isVisible = treeMode
-    }
-
-    private fun renderNodeText(node: MavenDependencyNodeView): String {
-        return node.renderText(
-            latest = latestVersionByKey[node.key],
-            showGroupId = showGroupIdCheckbox.isSelected,
-            showSize = showSizeCheckbox.isSelected,
-            sizeLabel = if (showSizeCheckbox.isSelected) artifactSizeLabel(node) else null,
-        )
     }
 
     private fun renderNodeHtml(node: MavenDependencyNodeView): String {
@@ -1092,15 +1035,6 @@ private data class PackageSearchRow(
     val versions: MutableList<String>,
     var selectedVersion: String,
 )
-
-private fun MavenDependencyNodeView.renderText(latest: String?, showGroupId: Boolean, showSize: Boolean, sizeLabel: String?): String {
-    val idText = if (showGroupId || groupId.isBlank()) "$groupId:$artifactId" else artifactId
-    val versionText = if (version.isBlank()) "(unknown version)" else version
-    val scopeText = scope?.takeIf { it.isNotBlank() }?.let { " [$it]" }.orEmpty()
-    val latestSuffix = if (!latest.isNullOrBlank() && latest != version) " -> $latest" else ""
-    val sizeSuffix = if (showSize && !sizeLabel.isNullOrBlank()) " ($sizeLabel)" else ""
-    return "$idText : $versionText$scopeText$latestSuffix$sizeSuffix"
-}
 
 private fun MavenDependencyNodeView.renderHtml(showGroupId: Boolean, latest: String?, showSize: Boolean, sizeLabel: String?): String {
     val versionText = if (version.isBlank()) "(unknown version)" else version
