@@ -300,13 +300,19 @@ class DependencyInsightService(private val project: Project) {
                 if (!pattern.containsMatchIn(declaration)) null else declaration.replaceFirst(pattern, "$1$newVersion$2")
             }
             Ecosystem.NPM -> {
+                val replacementVersion = npmUpgradedVersionValue(oldVersion, newVersion) ?: return null
                 val pattern = Regex("(\"${Regex.escape(dependency.name)}\"\\s*:\\s*\")${Regex.escape(oldVersion)}(\")")
-                if (!pattern.containsMatchIn(declaration)) null else declaration.replaceFirst(pattern, "$1$newVersion$2")
+                if (!pattern.containsMatchIn(declaration)) null else declaration.replaceFirst(pattern, "$1$replacementVersion$2")
             }
             Ecosystem.PYTHON -> {
                 val namePattern = Regex.escape(dependency.name)
                 val pattern = Regex("($namePattern\\s*(?:==|>=|<=|~=|!=|>|<)\\s*)${Regex.escape(oldVersion)}")
-                if (!pattern.containsMatchIn(declaration)) null else declaration.replaceFirst(pattern, "$1$newVersion")
+                if (pattern.containsMatchIn(declaration)) {
+                    declaration.replaceFirst(pattern, "$1$newVersion")
+                } else {
+                    val poetryPattern = Regex("(${Regex.escape(dependency.name)}\\s*=\\s*[\"'])${Regex.escape(oldVersion)}([\"'])")
+                    if (!poetryPattern.containsMatchIn(declaration)) null else declaration.replaceFirst(poetryPattern, "$1$newVersion$2")
+                }
             }
             Ecosystem.RUST -> {
                 val inlinePattern = Regex("(${Regex.escape(dependency.name)}\\s*=\\s*\")${Regex.escape(oldVersion)}(\")")
@@ -354,18 +360,43 @@ class DependencyInsightService(private val project: Project) {
                 DependencyInsertion(anchor, "\n    implementation(\"$notation:$version\")")
             }
             "package.json" -> {
-                val dependenciesMatch = Regex(""""dependencies"\s*:\s*\{""").find(text) ?: return null
-                val insertOffset = dependenciesMatch.range.last + 1
-                DependencyInsertion(insertOffset, "\n    \"${result.name}\": \"$version\",")
+                val dependenciesMatch = Regex(""""dependencies"\s*:\s*\{""").find(text)
+                if (dependenciesMatch != null) {
+                    val insertOffset = dependenciesMatch.range.last + 1
+                    DependencyInsertion(insertOffset, "\n    \"${result.name}\": \"$version\",")
+                } else {
+                    val rootOpen = text.indexOf('{')
+                    val rootClose = text.lastIndexOf('}')
+                    if (rootOpen < 0) return null
+                    val hasOtherFields = rootClose > rootOpen + 1 && text.substring(rootOpen + 1, rootClose).trim().isNotEmpty()
+                    val suffix = if (hasOtherFields) "," else ""
+                    val insertText = "\n  \"dependencies\": {\n    \"${result.name}\": \"$version\"\n  }$suffix"
+                    DependencyInsertion(rootOpen + 1, insertText)
+                }
             }
             "requirements.txt" -> DependencyInsertion(text.length, if (text.endsWith("\n") || text.isEmpty()) "${result.name}==$version\n" else "\n${result.name}==$version\n")
             "pyproject.toml" -> {
-                val anchor = Regex("""(?m)^\s*dependencies\s*=\s*\[""").find(text)?.range?.last?.plus(1) ?: return null
-                DependencyInsertion(anchor, "\n    \"${result.name}==$version\",")
+                val anchor = Regex("""(?m)^\s*dependencies\s*=\s*\[""").find(text)?.range?.last?.plus(1)
+                if (anchor != null) {
+                    DependencyInsertion(anchor, "\n    \"${result.name}==$version\",")
+                } else {
+                    val hasProject = Regex("""(?m)^\[project]""").containsMatchIn(text)
+                    val prefix = if (text.endsWith("\n") || text.isEmpty()) "" else "\n"
+                    if (hasProject) {
+                        DependencyInsertion(text.length, "${prefix}dependencies = [\n    \"${result.name}==$version\",\n]\n")
+                    } else {
+                        DependencyInsertion(text.length, "${prefix}[project]\ndependencies = [\n    \"${result.name}==$version\",\n]\n")
+                    }
+                }
             }
             "Cargo.toml" -> {
-                val anchor = Regex("""(?ms)^\[dependencies]\s*""").find(text)?.range?.last?.plus(1) ?: return null
-                DependencyInsertion(anchor, "\n${result.name} = \"$version\"")
+                val anchor = Regex("""(?ms)^\[dependencies]\s*""").find(text)?.range?.last?.plus(1)
+                if (anchor != null) {
+                    DependencyInsertion(anchor, "\n${result.name} = \"$version\"")
+                } else {
+                    val prefix = if (text.endsWith("\n") || text.isEmpty()) "" else "\n"
+                    DependencyInsertion(text.length, "${prefix}[dependencies]\n${result.name} = \"$version\"\n")
+                }
             }
             else -> null
         }
@@ -385,3 +416,36 @@ class DependencyInsightService(private val project: Project) {
 }
 
 fun Project.dependencyInsightService(): DependencyInsightService = service()
+
+internal fun npmUpgradedVersionValue(oldVersion: String, newVersion: String): String? {
+    val value = oldVersion.trim()
+    if (value.isBlank()) {
+        return null
+    }
+    val unsupportedPrefixes = listOf("workspace:", "file:", "link:", "git+", "github:", "gitlab:", "bitbucket:", "http://", "https://", "npm:")
+    if (unsupportedPrefixes.any { prefix -> value.startsWith(prefix, ignoreCase = true) }) {
+        return null
+    }
+    val simpleRange = Regex("""^([\^~])\s*([^\s]+)$""").matchEntire(value)
+    if (simpleRange != null) {
+        return "${simpleRange.groupValues[1]}$newVersion"
+    }
+    return if (value.contains(" ") || value.contains("||")) {
+        null
+    } else {
+        newVersion
+    }
+}
+
+internal fun hasRecommendedUpgrade(dependency: DependencyCoordinate, latestStable: String?): Boolean {
+    val latest = latestStable?.trim()?.takeIf { it.isNotEmpty() } ?: return false
+    val current = dependency.version.trim()
+    if (current == latest) {
+        return false
+    }
+    if (dependency.ecosystem != Ecosystem.NPM) {
+        return true
+    }
+    val normalizedCurrent = current.removePrefix("^").removePrefix("~").trim()
+    return normalizedCurrent != latest
+}

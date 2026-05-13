@@ -28,6 +28,7 @@ import org.knifefish.dependency.helper.scanner.DependencyFileScanner
 import org.knifefish.dependency.helper.services.DependencyInsightService
 import org.knifefish.dependency.helper.services.GradleSupport
 import org.knifefish.dependency.helper.services.MavenSupport
+import org.knifefish.dependency.helper.services.hasRecommendedUpgrade
 import java.awt.*
 import java.awt.event.KeyAdapter
 import java.awt.event.KeyEvent
@@ -709,9 +710,9 @@ class DependencyAnalyzerPanel(
             return
         }
         JPopupMenu().apply {
-            if (source != null && !latest.isNullOrBlank()) {
+            if (source != null && hasRecommendedUpgrade(source, latest)) {
                 if (managedOptions.isEmpty()) {
-                    add("Use Latest").addActionListener { service.upgradeDependency(source, latest) }
+                    add("Use Latest").addActionListener { service.upgradeDependency(source, latest!!) }
                 } else {
                     managedOptions.forEach { option ->
                         val label = when (option.target.kind.name) {
@@ -1041,7 +1042,11 @@ private data class PackageSearchRow(
 
 private fun MavenDependencyNodeView.renderHtml(showGroupId: Boolean, latest: String?, showSize: Boolean, sizeLabel: String?): String {
     val versionText = if (version.isBlank()) DependencyHelperBundle.message("Text.UnknownVersion") else version
-    val latestSuffix = if (!latest.isNullOrBlank() && latest != version) " -> $latest" else ""
+    val latestSuffix = when {
+        sourceDependency != null && hasRecommendedUpgrade(sourceDependency, latest) -> " -> $latest"
+        sourceDependency == null && !latest.isNullOrBlank() && latest != version -> " -> $latest"
+        else -> ""
+    }
     val scopeText = scope?.takeIf { it.isNotBlank() }?.let { " [$it]" }.orEmpty()
     val sizeSuffix = if (showSize && !sizeLabel.isNullOrBlank()) " ($sizeLabel)" else ""
     return createHTML().html {

@@ -57,19 +57,35 @@ class DependencyFileScannerTest {
         val file = LightVirtualFile("package.json", """
             {
               "dependencies": {
-                "react": "18.3.1"
+                "react": "^18.3.1"
               },
               "devDependencies": {
                 "vite": "5.4.1"
+              },
+              "overrides": {
+                "lodash": "4.17.21"
+              },
+              "resolutions": {
+                "chalk": "5.3.0"
+              },
+              "pnpm": {
+                "overrides": {
+                  "debug": "4.3.7"
+                }
               }
             }
         """.trimIndent())
 
         val dependencies = scanner.scan(file, file.content.toString())
 
-        assertEquals(2, dependencies.size)
-        assertTrue(dependencies.any { it.name == "react" && it.version == "18.3.1" })
+        assertTrue(dependencies.size >= 5)
+        val react = dependencies.firstOrNull { it.name == "react" } ?: error("react not found")
+        assertEquals("^18.3.1", react.version)
+        assertTrue(file.content.toString().substring(react.inspectionRange.startOffset, react.inspectionRange.endOffset).contains("\"react\": \"^18.3.1\""))
         assertTrue(dependencies.any { it.name == "vite" && it.version == "5.4.1" })
+        assertTrue(dependencies.any { it.name == "lodash" && it.scope == "overrides" })
+        assertTrue(dependencies.any { it.name == "chalk" && it.scope == "resolutions" })
+        assertTrue(dependencies.any { it.name == "debug" && it.scope == "pnpm.overrides" })
     }
 
     @Test
@@ -78,13 +94,45 @@ class DependencyFileScannerTest {
             [dependencies]
             serde = "1.0.216"
             tokio = { version = "1.42.0", features = ["full"] }
+
+            [dev-dependencies]
+            tempfile = "3.14.0"
+
+            [target.'cfg(unix)'.dependencies]
+            nix = "0.29.0"
         """.trimIndent())
 
         val dependencies = scanner.scan(file, file.content.toString())
 
-        assertEquals(2, dependencies.size)
+        assertEquals(4, dependencies.size)
+        assertTrue(dependencies.none { it.name == "dependencies" || it.name == "dev-dependencies" || it.name == "build-dependencies" })
         assertTrue(dependencies.any { it.name == "serde" })
         assertTrue(dependencies.any { it.name == "tokio" && it.version == "1.42.0" })
+        assertTrue(dependencies.any { it.name == "tempfile" && it.scope == "dev-dependencies" })
+        assertTrue(dependencies.any { it.name == "nix" && it.scope == "target-dependencies" })
+    }
+
+    @Test
+    fun scansPyprojectOptionalAndPoetryGroupDependencies() {
+        val file = LightVirtualFile("pyproject.toml", """
+            [project]
+            dependencies = [
+              "fastapi>=0.115.0",
+            ]
+
+            [project.optional-dependencies]
+            dev = [
+              "pytest>=8.3.0",
+            ]
+
+            [tool.poetry.group.docs.dependencies]
+            mkdocs = "^1.6.1"
+        """.trimIndent())
+
+        val dependencies = scanner.scan(file, file.content.toString())
+        assertTrue(dependencies.any { it.name == "fastapi" && it.version == "0.115.0" })
+        assertTrue(dependencies.any { it.name == "pytest" && it.version == "8.3.0" && it.scope == "optional-dev" })
+        assertTrue(dependencies.any { it.name == "mkdocs" && it.version == "^1.6.1" && it.scope == "poetry-group" })
     }
 
     @Test

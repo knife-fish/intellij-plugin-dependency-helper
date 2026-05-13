@@ -35,6 +35,9 @@ object DependencyUpgradeHtmlRenderer {
                 infoRow(DependencyHelperBundle.message("Doc.Current"), currentVersion)
                 infoRow(DependencyHelperBundle.message("Doc.Recommended"), latest, emphasize = true)
                 infoRow(DependencyHelperBundle.message("Doc.LatestAvailable"), available)
+                if (versionInfo.latestStable != null && versionInfo.latestAvailable != null && versionInfo.latestStable != versionInfo.latestAvailable) {
+                    infoRow(DependencyHelperBundle.message("Doc.Note"), escapeHtml(DependencyHelperBundle.message("Doc.LatestAvailable.Note")))
+                }
                 infoRow(DependencyHelperBundle.message("Doc.Published"), publishedAt)
                 infoRow(DependencyHelperBundle.message("Doc.Repository"), repository)
                 infoRow(DependencyHelperBundle.message("Doc.Rule"), latestRuleValue)

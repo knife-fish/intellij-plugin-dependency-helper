@@ -9,6 +9,7 @@ import org.knifefish.dependency.helper.DependencyHelperBundle
 import org.knifefish.dependency.helper.model.Ecosystem
 import org.knifefish.dependency.helper.services.MavenSupport
 import org.knifefish.dependency.helper.services.dependencyInsightService
+import org.knifefish.dependency.helper.services.hasRecommendedUpgrade
 
 class UpgradeDependencyAction : AnAction() {
 
@@ -27,7 +28,7 @@ class UpgradeDependencyAction : AnAction() {
             Messages.showWarningDialog(project, DependencyHelperBundle.message("Action.Upgrade.NoLatestFound", dependency.displayName), DependencyHelperBundle.message("Plugin.Name"))
             return
         }
-        if (latest == dependency.version) {
+        if (!hasRecommendedUpgrade(dependency, latest)) {
             Messages.showInfoMessage(project, DependencyHelperBundle.message("Action.Upgrade.AlreadyLatest", dependency.displayName), DependencyHelperBundle.message("Plugin.Name"))
             return
         }

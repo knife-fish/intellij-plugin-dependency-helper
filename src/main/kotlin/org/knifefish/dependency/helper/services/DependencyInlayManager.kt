@@ -50,7 +50,7 @@ object DependencyInlayManager {
         val latest = result.versionInfo.latestStable
         return when {
             latest == null -> InlayPresentation("  ${DependencyHelperBundle.message("Inlay.LatestUnavailable")}", false)
-            latest == result.dependency.version -> InlayPresentation("  ${DependencyHelperBundle.message("Inlay.UpToDate")}", false)
+            !hasRecommendedUpgrade(result.dependency, latest) -> InlayPresentation("  ${DependencyHelperBundle.message("Inlay.UpToDate")}", false)
             else -> InlayPresentation("  ${DependencyHelperBundle.message("Inlay.Latest", latest)}", true)
         }
     }

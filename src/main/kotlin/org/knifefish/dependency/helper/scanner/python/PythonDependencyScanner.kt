@@ -88,6 +88,55 @@ internal class PythonDependencyScanner : DependencyScannerContributor {
             }
         }
 
+        val poetryGroupRegex = Regex("""(?ms)^\[tool\.poetry\.group\.[^.]+\.dependencies]\s*(.*?)(^\[|\z)""")
+        poetryGroupRegex.findAll(text).forEach { section ->
+            val itemRegex = Regex("""(?m)^([A-Za-z0-9_.-]+)\s*=\s*["']([^"']+)["']""")
+            itemRegex.findAll(section.groupValues[1]).forEach { item ->
+                val name = item.groupValues[1]
+                if (name == "python") {
+                    return@forEach
+                }
+                val version = item.groupValues[2]
+                val versionStart = section.range.first + item.range.first + item.value.lastIndexOf(version)
+                results += createDependency(
+                    ecosystem = Ecosystem.PYTHON,
+                    group = null,
+                    name = name,
+                    version = version.trim(),
+                    scope = "poetry-group",
+                    file = file,
+                    declaration = item.value.trim(),
+                    lineNumber = lineNumber(text, versionStart),
+                    range = TextRangeMarker(versionStart, versionStart + version.length),
+                    inspectionRange = TextRangeMarker(section.range.first + item.range.first, section.range.first + item.range.last + 1),
+                )
+            }
+        }
+
+        val optionalDepsRegex = Regex("""(?ms)^\[project\.optional-dependencies]\s*(.*?)(^\[|\z)""")
+        optionalDepsRegex.findAll(text).forEach { section ->
+            val groupRegex = Regex("""(?ms)^([A-Za-z0-9_.-]+)\s*=\s*\[(.*?)]""")
+            groupRegex.findAll(section.groupValues[1]).forEach { groupMatch ->
+                val itemRegex = Regex(""""([A-Za-z0-9_.-]+)\s*(==|>=|<=|~=|!=|>|<)\s*([^"]+)"""")
+                itemRegex.findAll(groupMatch.groupValues[2]).forEach { item ->
+                    val version = item.groupValues[3]
+                    val versionStart = section.range.first + groupMatch.range.first + item.range.first + item.value.lastIndexOf(version)
+                    results += createDependency(
+                        ecosystem = Ecosystem.PYTHON,
+                        group = null,
+                        name = item.groupValues[1],
+                        version = version.trim(),
+                        scope = "optional-${groupMatch.groupValues[1]}",
+                        file = file,
+                        declaration = item.value.trim(),
+                        lineNumber = lineNumber(text, versionStart),
+                        range = TextRangeMarker(versionStart, versionStart + version.length),
+                        inspectionRange = TextRangeMarker(section.range.first + groupMatch.range.first + item.range.first, section.range.first + groupMatch.range.first + item.range.last + 1),
+                    )
+                }
+            }
+        }
+
         return results
     }
 }
