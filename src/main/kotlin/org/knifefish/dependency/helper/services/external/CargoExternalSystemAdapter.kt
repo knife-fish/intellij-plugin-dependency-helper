@@ -1,9 +1,14 @@
 package org.knifefish.dependency.helper.services.external
 
+import com.intellij.openapi.actionSystem.*
+import com.intellij.openapi.actionSystem.ex.ActionUtil
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.util.Disposer
 import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.util.messages.MessageBusConnection
 import org.knifefish.dependency.helper.model.DependencyCoordinate
 import org.knifefish.dependency.helper.model.Ecosystem
 import org.knifefish.dependency.helper.model.TextRangeMarker
@@ -29,10 +34,42 @@ internal class CargoExternalSystemAdapter : ExternalDependencySystem {
 
     /** 刷新 Rust/Cargo 项目模型。 */
     override fun refresh(project: Project, file: VirtualFile, afterRefresh: (() -> Unit)?): Boolean {
-        val cargoProjectsService = project.getService(CargoProjectsService::class.java) ?: return false
-        cargoProjectsService.refreshAllProjects(false).whenComplete { _, _ ->
-            afterRefresh?.invoke()
+        if (project.getService(CargoProjectsService::class.java) == null) {
+            return false
         }
+        val refreshAction = ActionManager.getInstance().getAction(CARGO_REFRESH_ACTION_ID) ?: return false
+        val callbackDisposable = afterRefresh?.let { callback ->
+            val disposable = Disposer.newDisposable("dependency-helper-cargo-refresh")
+            val connection: MessageBusConnection = project.messageBus.connect(disposable)
+            connection.subscribe(
+                CargoProjectsService.CARGO_PROJECTS_REFRESH_TOPIC,
+                object : CargoProjectsService.CargoProjectsRefreshListener {
+                    override fun onRefreshFinished(status: CargoProjectsService.CargoRefreshStatus, isExplicitReload: Boolean) {
+                        Disposer.dispose(disposable)
+                        ApplicationManager.getApplication().invokeLater(callback)
+                    }
+                },
+            )
+            disposable
+        }
+        ApplicationManager.getApplication().invokeLater {
+            val dataContext = DataContext { dataId ->
+                when {
+                    CommonDataKeys.PROJECT.`is`(dataId) -> project
+                    else -> null
+                }
+            }
+            val event = AnActionEvent.createEvent(
+                refreshAction,
+                dataContext,
+                refreshAction.templatePresentation.clone(),
+                ActionPlaces.UNKNOWN,
+                ActionUiKind.NONE,
+                null,
+            )
+            ActionUtil.performAction(refreshAction, event)
+        }
+        callbackDisposable ?: afterRefresh?.let { ApplicationManager.getApplication().invokeLater(it) }
         return true
     }
 
@@ -294,4 +331,8 @@ internal class CargoExternalSystemAdapter : ExternalDependencySystem {
         val declarationRange: TextRangeMarker,
         val scope: String?,
     )
+
+    private companion object {
+        const val CARGO_REFRESH_ACTION_ID = "Cargo.RefreshCargoProject"
+    }
 }

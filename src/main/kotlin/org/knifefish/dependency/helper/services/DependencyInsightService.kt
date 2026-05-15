@@ -2,7 +2,6 @@ package org.knifefish.dependency.helper.services
 
 import com.intellij.codeInsight.daemon.DaemonCodeAnalyzer
 import com.intellij.openapi.application.ApplicationManager
-import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
@@ -22,6 +21,7 @@ import org.knifefish.dependency.helper.services.ecosystem.DependencyDeclarationR
 import org.knifefish.dependency.helper.services.ecosystem.DependencyInsertion
 import org.knifefish.dependency.helper.services.ecosystem.DependencyInsertionPlanner
 import org.knifefish.dependency.helper.services.external.ExternalDependencySystems
+import org.knifefish.dependency.helper.util.readAction
 import java.util.concurrent.ConcurrentHashMap
 
 @Service(Service.Level.PROJECT)
@@ -34,10 +34,10 @@ class DependencyInsightService(private val project: Project) {
     private var latestVersionPolicy: LatestVersionPolicy = LatestVersionPolicy.RELEASE_ONLY
 
     fun scanProject(): DependencySnapshot {
-        return ReadAction.compute<DependencySnapshot, RuntimeException> {
+        return readAction {
             val repositories = ProjectRepositoryResolver(project).resolveForProject()
             val dependencies = mutableListOf<DependencyCoordinate>()
-            val baseDir = project.guessProjectDir() ?: return@compute DependencySnapshot(emptyList(), repositories)
+            val baseDir = project.guessProjectDir() ?: return@readAction DependencySnapshot(emptyList(), repositories)
             VfsUtilCore.iterateChildrenRecursively(baseDir, { file ->
                 val excluded = file.path.contains("/build/") || file.path.contains("/.gradle/") || file.path.contains("/.git/")
                 !excluded
@@ -52,7 +52,7 @@ class DependencyInsightService(private val project: Project) {
     }
 
     fun scanFile(file: VirtualFile): List<DependencyCoordinate> =
-        ReadAction.compute<List<DependencyCoordinate>, RuntimeException> {
+        readAction {
             scanFileInternal(file)
         }
 
@@ -123,6 +123,7 @@ class DependencyInsightService(private val project: Project) {
         }
         val repositories = ProjectRepositoryResolver(project).resolveForProject()
         ApplicationManager.getApplication().executeOnPooledThread {
+            val latestRule = latestVersionPolicy().displayName
             val lookups = dependencies.map { dependency ->
                 val info = lookupLatestVersion(
                     dependency,
@@ -132,8 +133,8 @@ class DependencyInsightService(private val project: Project) {
                 DependencyLookupResult(dependency, info)
             }
             ApplicationManager.getApplication().invokeLater {
-                DependencyInlayManager.render(editor, lookups)
-                DaemonCodeAnalyzer.getInstance(project).restart()
+                DependencyInlayManager.render(editor, lookups, latestRule)
+                DaemonCodeAnalyzer.getInstance(project).settingsChanged()
             }
         }
     }

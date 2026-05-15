@@ -1,11 +1,11 @@
 package org.knifefish.dependency.helper.repository
 
-import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.project.guessProjectDir
 import com.intellij.openapi.vfs.VirtualFile
 import org.knifefish.dependency.helper.model.Ecosystem
 import org.knifefish.dependency.helper.model.RepositorySpec
+import org.knifefish.dependency.helper.util.readAction
 import org.w3c.dom.Element
 import java.nio.file.Files
 import java.nio.file.Path
@@ -15,7 +15,7 @@ import kotlin.io.path.exists
 class ProjectRepositoryResolver(private val project: Project) {
 
     fun resolveForProject(): Map<Ecosystem, List<RepositorySpec>> {
-        return ReadAction.compute<Map<Ecosystem, List<RepositorySpec>>, RuntimeException> {
+        return readAction {
             val byEcosystem = mutableMapOf<Ecosystem, MutableList<RepositorySpec>>()
             Ecosystem.entries.forEach { byEcosystem[it] = mutableListOf() }
             project.guessProjectDir()?.let { root ->

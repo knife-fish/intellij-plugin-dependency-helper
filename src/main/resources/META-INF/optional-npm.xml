@@ -4,4 +4,11 @@
         <packageIndexSupport implementation="org.knifefish.dependency.helper.services.ecosystem.NpmPackageIndexSupport"/>
         <externalDependencySystem implementation="org.knifefish.dependency.helper.services.external.NpmExternalSystemAdapter"/>
     </extensions>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <lang.documentationProvider
+                language="JSON"
+                order="first"
+                implementationClass="org.knifefish.dependency.helper.documentation.DependencyDocumentationProvider"/>
+    </extensions>
 </idea-plugin>

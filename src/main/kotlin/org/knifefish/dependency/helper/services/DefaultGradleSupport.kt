@@ -1,39 +1,36 @@
 package org.knifefish.dependency.helper.services
 
+import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
-import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.diagnostic.thisLogger
+import com.intellij.openapi.externalSystem.dependency.analyzer.DependencyAnalyzerContributor
+import com.intellij.openapi.externalSystem.dependency.analyzer.DependencyAnalyzerDependency
+import com.intellij.openapi.externalSystem.dependency.analyzer.DependencyAnalyzerExtension
+import com.intellij.openapi.externalSystem.dependency.analyzer.DependencyAnalyzerProject
 import com.intellij.openapi.externalSystem.importing.ImportSpecBuilder
-import com.intellij.openapi.externalSystem.model.ProjectKeys
 import com.intellij.openapi.externalSystem.model.ProjectSystemId
-import com.intellij.openapi.externalSystem.model.project.ModuleData
 import com.intellij.openapi.externalSystem.model.project.dependencies.ArtifactDependencyNode
 import com.intellij.openapi.externalSystem.model.project.dependencies.DependencyNode
 import com.intellij.openapi.externalSystem.model.project.dependencies.ProjectDependencyNode
 import com.intellij.openapi.externalSystem.model.project.dependencies.ReferenceNode
 import com.intellij.openapi.externalSystem.service.execution.ProgressExecutionMode
 import com.intellij.openapi.externalSystem.service.project.ExternalProjectRefreshCallback
-import com.intellij.openapi.externalSystem.service.project.ExternalSystemModuleDataIndex
-import com.intellij.openapi.externalSystem.service.project.manage.ExternalProjectsDataStorage
 import com.intellij.openapi.externalSystem.util.ExternalSystemApiUtil
 import com.intellij.openapi.externalSystem.util.ExternalSystemUtil
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.module.ModuleManager
-import com.intellij.openapi.module.ModuleUtilCore
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.roots.ProjectFileIndex
+import com.intellij.openapi.util.Disposer
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VirtualFile
-import org.jetbrains.plugins.gradle.dependency.analyzer.GradleDependencyNodeIndex
-import org.jetbrains.plugins.gradle.service.project.GradleModuleDataIndex
 import org.jetbrains.plugins.gradle.util.GradleConstants
-import org.jetbrains.plugins.gradle.util.GradleModuleData
 import org.knifefish.dependency.helper.model.DependencyCoordinate
 import org.knifefish.dependency.helper.model.MavenDependencyNodeView
 import org.knifefish.dependency.helper.model.TextRangeMarker
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.util.*
 
 class DefaultGradleSupport(private val project: Project) : GradleSupport {
 
@@ -43,26 +40,7 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
         }
         val analysisFile = resolveAnalysisFile(file)
         val projectPath = findGradleProjectPath(analysisFile)
-        val moduleData = ReadAction.compute<GradleModuleData?, RuntimeException> {
-            val byProjectPath = projectPath
-                ?.let { ExternalSystemModuleDataIndex.findModuleNode(project, it) }
-                ?.let(::GradleModuleData)
-            if (byProjectPath != null) {
-                return@compute byProjectPath
-            }
-            val byStorage = projectPath?.let(::findGradleModuleDataInStorage)
-            if (byStorage != null) {
-                return@compute byStorage
-            }
-            val byModuleScan = projectPath?.let(::findGradleModuleDataByProjectPath)
-            if (byModuleScan != null) {
-                return@compute byModuleScan
-            }
-            val module = ProjectFileIndex.getInstance(project).getModuleForFile(analysisFile, false)
-                ?: ModuleUtilCore.findModuleForFile(analysisFile, project)
-                ?: return@compute null
-            GradleModuleDataIndex.findGradleModuleData(module)
-        } ?: run {
+        val analyzerContext = findGradleAnalyzerContext(projectPath) ?: run {
             thisLogger().info(
                 "DependencyHelper Gradle analyze: file=${file.path}, analysisFile=${analysisFile.path}, projectPath=$projectPath, " +
                     "resolvedScopes=0, fallback=declared-no-module",
@@ -72,19 +50,21 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
 
         thisLogger().info(
             "DependencyHelper Gradle analyze collecting: file=${file.path}, analysisFile=${analysisFile.path}, " +
-                "projectPath=$projectPath, module=${moduleData.moduleName}, gradleProjectDir=${moduleData.gradleProjectDir}",
+                "projectPath=$projectPath, module=${analyzerContext.externalProject.module.name}",
         )
-        val scopeNodes = runCatching {
-            GradleDependencyNodeIndex.getOrCollectDependencies(project, moduleData).get()
+        val analyzerDependencies = runCatching {
+            analyzerContext.use {
+                analyzerContext.contributor.getDependencies(analyzerContext.externalProject)
+            }
         }.getOrElse {
             thisLogger().warn("DependencyHelper Gradle analyze failed for ${file.path} using ${analysisFile.path}", it)
             emptyList()
         }
         thisLogger().info(
             "DependencyHelper Gradle analyze collected: file=${file.path}, analysisFile=${analysisFile.path}, " +
-                "projectPath=$projectPath, scopeNodes=${scopeNodes.size}",
+                "projectPath=$projectPath, dependencies=${analyzerDependencies.size}",
         )
-        if (scopeNodes.isEmpty()) {
+        if (analyzerDependencies.isEmpty()) {
             thisLogger().info(
                 "DependencyHelper Gradle analyze: file=${file.path}, analysisFile=${analysisFile.path}, projectPath=$projectPath, " +
                     "resolvedScopes=0, fallback=declared-empty",
@@ -110,29 +90,26 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
             path = rootPath,
             sourceDependency = null,
         )
-        val sourceNodesById = mutableMapOf<Long, DependencyNode>()
         val resolvedDirectNodes = mutableListOf<MavenDependencyNodeView>()
         val occurrenceTreesByDirectKey = linkedMapOf<String, MutableList<MavenDependencyNodeView>>()
-        scopeNodes.forEach { scopeNode ->
-            scopeNode.dependencies.forEach { dependencyNode ->
-                val occurrence = buildResolvedGradleNode(
+        val childrenByParent = analyzerDependencies.childrenByParent()
+        analyzerDependencies.asSequence()
+            .filter { it.parent == null }
+            .flatMap { childrenByParent.childrenOf(it).asSequence() }
+            .forEach { dependency ->
+                val occurrence = buildAnalyzerDependencyNode(
                     ownerFile = file,
                     ownerProjectName = projectName,
-                    node = dependencyNode,
-                    inheritedScope = scopeNode.scope,
+                    dependency = dependency,
                     parentPath = rootPath,
-                    directDependenciesByIdentity = directDependenciesByIdentity,
-                    directDependenciesByKey = directDependenciesByKey,
-                    sourceNodesById = sourceNodesById,
-                    visitingIds = linkedSetOf(),
-                )
+                    childrenByParent = childrenByParent,
+                ) ?: return@forEach
                 resolvedDirectNodes += occurrence
                 val directKey = directDependencyKey(occurrence, directDependenciesByIdentity, directDependenciesByKey)
                 if (directKey != null) {
                     occurrenceTreesByDirectKey.getOrPut(directKey) { mutableListOf() }.add(occurrence)
                 }
             }
-        }
         directDependencies.forEach { dependency ->
             val directKey = dependencyKey(dependency.group, dependency.name)
             val rootChild = MavenDependencyNodeView(
@@ -161,8 +138,8 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
             mergeInto(root.children, occurrence)
         }
         thisLogger().info(
-            "DependencyHelper Gradle analyze: file=${file.path}, analysisFile=${analysisFile.path}, projectPath=$projectPath, " +
-                "resolvedScopes=${scopeNodes.size}, " +
+                "DependencyHelper Gradle analyze: file=${file.path}, analysisFile=${analysisFile.path}, projectPath=$projectPath, " +
+                "resolvedDependencies=${analyzerDependencies.size}, " +
                 "topLevel=${root.children.size}, topLevelChildren=${root.children.joinToString { "${it.displayName}:${it.children.size}" }}, " +
                 "nodeCount=${flattenResolvedNodes(root).size}",
         )
@@ -910,11 +887,47 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
         return if (file.isDirectory) file else file.parent
     }
 
-    private fun findGradleModuleDataByProjectPath(projectPath: String): GradleModuleData? {
+    private fun findGradleAnalyzerContext(projectPath: String?): GradleAnalyzerContext? {
+        val disposable = Disposer.newDisposable("dependency-helper-gradle-analyzer")
+        val contributor = runCatching {
+            val extensionDisposable = DependencyAnalyzerExtension.createExtensionDisposable(GradleConstants.SYSTEM_ID, disposable)
+            DependencyAnalyzerExtension.getExtension(GradleConstants.SYSTEM_ID)
+                .createContributor(project, extensionDisposable)
+        }.getOrElse {
+            Disposer.dispose(disposable)
+            return null
+        }
+        val externalProjects = contributor.getProjects()
+        logGradleAnalyzerProjects(projectPath, externalProjects)
+        val selectedProject = externalProjects
+            .filter { externalProject ->
+                val module = externalProject.module
+                val externalProjectPath = ExternalSystemApiUtil.getExternalProjectPath(module)
+                val rootProjectPath = ExternalSystemApiUtil.getExternalRootProjectPath(module)
+                projectPath == null || externalProjectPath == projectPath || rootProjectPath == projectPath
+            }
+            .sortedByDescending { ExternalSystemApiUtil.getExternalModuleType(it.module)?.contains("sourceSet", ignoreCase = true) != true }
+            .firstOrNull()
+        if (selectedProject == null) {
+            Disposer.dispose(disposable)
+            return null
+        }
+        return GradleAnalyzerContext(disposable, contributor, selectedProject)
+    }
+
+    private fun logGradleAnalyzerProjects(projectPath: String?, externalProjects: List<DependencyAnalyzerProject>) {
         val modules = ModuleManager.getInstance(project).modules
         val gradleModules = modules.filter { ExternalSystemApiUtil.isExternalSystemAwareModule(GradleConstants.SYSTEM_ID.id, it) }
         thisLogger().info(
-            "DependencyHelper Gradle module scan: projectPath=$projectPath, modules=" +
+            "DependencyHelper Gradle module scan: projectPath=$projectPath, analyzerProjects=" +
+                externalProjects.joinToString { externalProject ->
+                    val module = externalProject.module
+                    val externalProjectPath = ExternalSystemApiUtil.getExternalProjectPath(module)
+                    val rootProjectPath = ExternalSystemApiUtil.getExternalRootProjectPath(module)
+                    val externalProjectId = ExternalSystemApiUtil.getExternalProjectId(module)
+                    val moduleType = ExternalSystemApiUtil.getExternalModuleType(module)
+                    "${module.name}[title=${externalProject.title},project=$externalProjectPath,root=$rootProjectPath,id=$externalProjectId,type=$moduleType]"
+                } + ", modules=" +
                 gradleModules.joinToString { module ->
                     val externalProjectPath = ExternalSystemApiUtil.getExternalProjectPath(module)
                     val rootProjectPath = ExternalSystemApiUtil.getExternalRootProjectPath(module)
@@ -923,47 +936,78 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
                     "${module.name}[project=$externalProjectPath,root=$rootProjectPath,id=$externalProjectId,type=$moduleType]"
                 },
         )
-        val candidates = gradleModules
-            .filter { module ->
-                val externalProjectPath = ExternalSystemApiUtil.getExternalProjectPath(module)
-                val rootProjectPath = ExternalSystemApiUtil.getExternalRootProjectPath(module)
-                externalProjectPath == projectPath || rootProjectPath == projectPath
+    }
+
+    private fun buildAnalyzerDependencyNode(
+        ownerFile: VirtualFile,
+        ownerProjectName: String,
+        dependency: DependencyAnalyzerDependency,
+        parentPath: List<String>,
+        childrenByParent: AnalyzerChildrenByParent,
+    ): MavenDependencyNodeView? {
+        val data = dependency.data
+        val groupId: String
+        val artifactId: String
+        val version: String
+        when (data) {
+            is DependencyAnalyzerDependency.Data.Artifact -> {
+                groupId = data.groupId
+                artifactId = data.artifactId
+                version = data.version
             }
-            .sortedByDescending { ExternalSystemApiUtil.getExternalModuleType(it)?.contains("sourceSet", ignoreCase = true) != true }
-        thisLogger().info(
-            "DependencyHelper Gradle module candidates: projectPath=$projectPath, candidates=" +
-                candidates.joinToString { module ->
-                    val moduleType = ExternalSystemApiUtil.getExternalModuleType(module)
-                    val externalProjectId = ExternalSystemApiUtil.getExternalProjectId(module)
-                    val resolved = GradleModuleDataIndex.findGradleModuleData(module)
-                    "${module.name}[id=$externalProjectId,type=$moduleType,resolved=${resolved != null}]"
-                },
+            is DependencyAnalyzerDependency.Data.Module -> {
+                groupId = ""
+                artifactId = data.name
+                version = ""
+            }
+        }
+        val displayName = "$groupId:$artifactId:$version"
+        val node = MavenDependencyNodeView(
+            ownerProjectName = ownerProjectName,
+            ownerProjectFile = ownerFile,
+            groupId = groupId,
+            artifactId = artifactId,
+            version = version,
+            scope = dependency.scope.name,
+            packaging = null,
+            path = parentPath + displayName,
+            sourceDependency = null,
         )
-        return candidates.firstNotNullOfOrNull { module ->
-            GradleModuleDataIndex.findGradleModuleData(module)
+        childrenByParent.childrenOf(dependency).forEach { child ->
+            buildAnalyzerDependencyNode(ownerFile, ownerProjectName, child, node.path, childrenByParent)
+                ?.let { node.children += it }
+        }
+        return node
+    }
+
+    private fun List<DependencyAnalyzerDependency>.childrenByParent(): AnalyzerChildrenByParent {
+        val result = AnalyzerChildrenByParent()
+        forEach { dependency ->
+            val parent = dependency.parent ?: return@forEach
+            result.add(parent, dependency)
+        }
+        return result
+    }
+
+    private data class GradleAnalyzerContext(
+        private val disposable: Disposable,
+        val contributor: DependencyAnalyzerContributor,
+        val externalProject: DependencyAnalyzerProject,
+    ) : AutoCloseable {
+        override fun close() {
+            Disposer.dispose(disposable)
         }
     }
 
-    private fun findGradleModuleDataInStorage(projectPath: String): GradleModuleData? {
-        val storage = ExternalProjectsDataStorage.getInstance(project)
-        val moduleNodes = storage.list(GradleConstants.SYSTEM_ID)
-            .mapNotNull { it.externalProjectStructure }
-            .flatMap { ExternalSystemApiUtil.getChildren(it, ProjectKeys.MODULE) }
-            .filter { it.data.owner == GradleConstants.SYSTEM_ID }
-        thisLogger().info(
-            "DependencyHelper Gradle storage module nodes: projectPath=$projectPath, nodes=" +
-                moduleNodes.joinToString { node ->
-                    val data: ModuleData = node.data
-                    val gradleData = runCatching { GradleModuleData(node) }.getOrNull()
-                    "${data.id}[linked=${data.linkedExternalProjectPath},module=${data.moduleName},identity=${gradleData?.gradleIdentityPathOrNull},owner=${data.owner}]"
-                },
-        )
-        val matchedNode = moduleNodes.firstOrNull { it.data.linkedExternalProjectPath == projectPath }
-            ?: moduleNodes.firstOrNull { node ->
-                val linkedPath = node.data.linkedExternalProjectPath
-                linkedPath.startsWith(projectPath) || projectPath.startsWith(linkedPath)
-            }
-        return matchedNode?.let(::GradleModuleData)
+    private class AnalyzerChildrenByParent {
+        private val children = IdentityHashMap<DependencyAnalyzerDependency, MutableList<DependencyAnalyzerDependency>>()
+
+        fun add(parent: DependencyAnalyzerDependency, child: DependencyAnalyzerDependency) {
+            children.getOrPut(parent) { mutableListOf() } += child
+        }
+
+        fun childrenOf(parent: DependencyAnalyzerDependency): List<DependencyAnalyzerDependency> =
+            children[parent].orEmpty()
     }
 
     private fun resolveAnalysisFile(file: VirtualFile): VirtualFile {

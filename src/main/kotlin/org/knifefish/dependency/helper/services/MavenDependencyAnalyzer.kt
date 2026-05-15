@@ -1,7 +1,6 @@
 package org.knifefish.dependency.helper.services
 
 import com.intellij.openapi.application.ApplicationManager
-import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.OpenFileDescriptor
@@ -23,6 +22,7 @@ import org.knifefish.dependency.helper.model.DependencyCoordinate
 import org.knifefish.dependency.helper.model.Ecosystem
 import org.knifefish.dependency.helper.model.MavenDependencyNodeView
 import org.knifefish.dependency.helper.model.TextRangeMarker
+import org.knifefish.dependency.helper.util.readAction
 
 class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
 
@@ -32,8 +32,8 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
         if (file.name != "pom.xml") {
             return dependencies
         }
-        return ReadAction.compute<List<DependencyCoordinate>, RuntimeException> {
-            val mavenProject = mavenProjectsManager().findProject(file) ?: return@compute dependencies
+        return readAction {
+            val mavenProject = mavenProjectsManager().findProject(file) ?: return@readAction dependencies
             dependencies.map { dependency ->
                 if (dependency.ecosystem != Ecosystem.MAVEN || dependency.version.isNotBlank()) {
                     dependency
@@ -46,7 +46,7 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
     }
 
     override fun analyze(): List<MavenDependencyNodeView> {
-        return ReadAction.compute<List<MavenDependencyNodeView>, RuntimeException> {
+        return readAction {
             mavenProjectsManager().projects.map { projectNode ->
                 val directDependencies = directDependenciesByKey(projectNode)
                 buildProjectNodes(projectNode, directDependencies)
@@ -84,9 +84,9 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
         val directDependencyGa = view.path[1]
         val directGroupId = directDependencyGa.substringBefore(':')
         val directArtifactId = directDependencyGa.substringAfter(':')
-        val state = ReadAction.compute<ExcludeState?, RuntimeException> {
-            val xmlFile = PsiManager.getInstance(project).findFile(view.ownerProjectFile) as? XmlFile ?: return@compute null
-            val dependencyTag = findDependencyTag(xmlFile, directGroupId, directArtifactId) ?: return@compute null
+        val state = readAction {
+            val xmlFile = PsiManager.getInstance(project).findFile(view.ownerProjectFile) as? XmlFile ?: return@readAction null
+            val dependencyTag = findDependencyTag(xmlFile, directGroupId, directArtifactId) ?: return@readAction null
             val exclusionsTag = dependencyTag.findFirstSubTag("exclusions")
             val exists = exclusionsTag?.findSubTags("exclusion")?.any { exclusion ->
                 exclusion.findFirstSubTag("groupId")?.value?.text == view.groupId &&
@@ -118,9 +118,9 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
     }
 
     fun insertManagedVersion(dependency: DependencyCoordinate, newVersion: String): Boolean {
-        val state = ReadAction.compute<ManagedDependencyEditState?, RuntimeException> {
-            val psiFile = PsiManager.getInstance(project).findFile(dependency.file) as? XmlFile ?: return@compute null
-            val dependencyTag = findDependencyTag(psiFile, dependency.group ?: return@compute null, dependency.name) ?: return@compute null
+        val state = readAction {
+            val psiFile = PsiManager.getInstance(project).findFile(dependency.file) as? XmlFile ?: return@readAction null
+            val dependencyTag = findDependencyTag(psiFile, dependency.group ?: return@readAction null, dependency.name) ?: return@readAction null
             ManagedDependencyEditState(dependencyTag, dependencyTag.findFirstSubTag("version"))
         } ?: return false
         WriteCommandAction.runWriteCommandAction(project, Runnable {
@@ -177,7 +177,7 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
         if (dependency.ecosystem != Ecosystem.MAVEN) {
             return emptyList()
         }
-        return ReadAction.compute<List<ManagedUpgradeTarget>, RuntimeException> {
+        return readAction {
             val baseTarget = ManagedUpgradeTarget(
                 id = "current",
                 kind = ManagedUpgradeTargetKind.CURRENT,
@@ -332,11 +332,11 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
     }
 
     private fun updateParentVersion(file: VirtualFile, groupId: String?, artifactId: String?, newVersion: String): Boolean {
-        val versionTag = ReadAction.compute<XmlTag?, RuntimeException> {
-            val model = MavenDomUtil.getMavenDomProjectModel(project, file) ?: return@compute null
+        val versionTag = readAction {
+            val model = MavenDomUtil.getMavenDomProjectModel(project, file) ?: return@readAction null
             val parent = model.mavenParent
             if (parent.groupId.stringValue != groupId || parent.artifactId.stringValue != artifactId) {
-                return@compute null
+                return@readAction null
             }
             parent.version.xmlTag
         } ?: return false
@@ -344,8 +344,8 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
     }
 
     private fun updateBomVersion(file: VirtualFile, groupId: String?, artifactId: String?, newVersion: String): Boolean {
-        val versionTag = ReadAction.compute<XmlTag?, RuntimeException> {
-            val model = MavenDomUtil.getMavenDomProjectModel(project, file) ?: return@compute null
+        val versionTag = readAction {
+            val model = MavenDomUtil.getMavenDomProjectModel(project, file) ?: return@readAction null
             model.dependencyManagement?.dependencies?.dependencies.orEmpty()
                 .firstOrNull {
                     it.groupId.stringValue == groupId &&
@@ -373,7 +373,7 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
         val parentArtifactId = parentGa.substringAfter(':')
         val parentNode = analyze().asSequence().flatMap { flatten(it).asSequence() }
             .firstOrNull { it.groupId == parentGroupId && it.artifactId == parentArtifactId } ?: return false
-        val reactorPom = ReadAction.compute<VirtualFile?, RuntimeException> {
+        val reactorPom = readAction {
             mavenProjectsManager().findProject(
                 MavenArtifact(parentGroupId, parentArtifactId, parentNode.version, "jar", null, parentNode.scope ?: "compile", null, false, "jar", null, null, true, false),
             )?.file
@@ -391,7 +391,7 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
     }
 
     private fun openReactorPom(view: MavenDependencyNodeView): Boolean {
-        val reactorProject = ReadAction.compute<MavenProject?, RuntimeException> {
+        val reactorProject = readAction {
             mavenProjectsManager().findProject(
                 MavenArtifact(view.groupId, view.artifactId, view.version, "jar", null, view.scope ?: "compile", null, false, "jar", null, null, true, false),
             )
@@ -410,7 +410,7 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
     }
 
     private fun replaceTagValue(file: VirtualFile, versionTag: XmlTag, newVersion: String): Boolean {
-        val targetTag = ReadAction.compute<XmlTag?, RuntimeException> {
+        val targetTag = readAction {
             resolveVersionWriteTag(file, versionTag)
         } ?: return false
         WriteCommandAction.runWriteCommandAction(project, Runnable {
@@ -553,7 +553,7 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
     }
 
     override fun refreshMavenProject(file: VirtualFile, afterRefresh: (() -> Unit)?) {
-        val mavenProject = ReadAction.compute<MavenProject?, RuntimeException> { mavenProjectsManager().findProject(file) } ?: run {
+        val mavenProject = readAction { mavenProjectsManager().findProject(file) } ?: run {
             afterRefresh?.invoke()
             return
         }
@@ -568,7 +568,7 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
                 }
             }, disposable)
         }
-        mavenProjectsManager().scheduleForceUpdateMavenProject(mavenProject)
+        mavenProjectsManager().forceUpdateAllProjectsOrFindAllAvailablePomFiles()
     }
 
     private data class ExcludeState(

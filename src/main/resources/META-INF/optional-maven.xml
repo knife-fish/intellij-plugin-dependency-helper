@@ -10,13 +10,8 @@
         <postStartupActivity implementation="org.knifefish.dependency.helper.startup.MavenProjectActivity" />
         <lang.documentationProvider
                 language="XML"
+                order="first"
                 implementationClass="org.knifefish.dependency.helper.documentation.DependencyDocumentationProvider"/>
     </extensions>
 
-    <extensions defaultExtensionNs="com.intellij.platform.backend">
-        <documentation.targetProvider
-                implementation="org.knifefish.dependency.helper.documentation.DependencyDocumentationTargetProvider"/>
-        <documentation.linkHandler
-                implementation="org.knifefish.dependency.helper.documentation.DependencyDocumentationLinkHandler"/>
-    </extensions>
 </idea-plugin>

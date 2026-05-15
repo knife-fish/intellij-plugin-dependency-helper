@@ -44,23 +44,36 @@ object DependencyUpgradeHtmlRenderer {
             }
             if (versionInfo.latestStable != null) {
                 p {
-                    a(href = "psi_element://dependency-helper-upgrade:current") {
-                        +DependencyHelperBundle.message("Doc.UpgradeTo", versionInfo.latestStable)
-                    }
-                    managedOptions
+                    val upgradeLinks = listOf(
+                        UpgradeLink(
+                            href = "psi_element://dependency-helper-upgrade:current",
+                            text = DependencyHelperBundle.message("Doc.UpgradeTo", versionInfo.latestStable),
+                        )
+                    ) + managedOptions
                         .filter { it.target.kind != ManagedUpgradeTargetKind.CURRENT }
-                        .forEach { option ->
-                            +" | "
-                            a(href = "psi_element://dependency-helper-upgrade:${option.target.id}") {
-                                +DependencyHelperBundle.message("Doc.UpgradeTargetTo", option.target.kind.buttonLabel(), option.latestVersion)
-                            }
+                        .map { option ->
+                            UpgradeLink(
+                                href = "psi_element://dependency-helper-upgrade:${option.target.id}",
+                                text = DependencyHelperBundle.message("Doc.UpgradeTargetTo", option.target.kind.buttonLabel(), option.latestVersion),
+                            )
                         }
+                    upgradeLinks.forEachIndexed { index, link ->
+                        a(href = link.href) {
+                            if (index > 0) {
+                                style = "margin-left: 10px"
+                            }
+                            +link.text
+                        }
+                    }
                 }
             }
         }
         return buildString {
             append("<div class='${DocumentationMarkup.CLASS_DEFINITION}'>")
-            append(path)
+            append(escapeHtml(dependency.displayName))
+            append("<br/><span style=\"color: #787878\">")
+            append(escapeHtml(path))
+            append("</span>")
             append("</div>")
             append(content)
         }
@@ -85,6 +98,11 @@ object DependencyUpgradeHtmlRenderer {
     private fun escapeHtml(value: String): String {
         return StringUtil.escapeXmlEntities(value)
     }
+
+    private data class UpgradeLink(
+        val href: String,
+        val text: String,
+    )
 
     private fun ManagedUpgradeTargetKind.buttonLabel(): String = when (this) {
         ManagedUpgradeTargetKind.CURRENT -> DependencyHelperBundle.message("Doc.Upgrade")

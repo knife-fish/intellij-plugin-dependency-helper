@@ -32,6 +32,9 @@
         <postStartupActivity implementation="org.knifefish.dependency.helper.startup.DependencyProjectActivity" />
         <fileEditorProvider implementation="org.knifefish.dependency.helper.editor.DependencyAnalyzerFileEditorProvider"/>
         <notificationGroup id="Dependency Helper Notifications" displayType="NONE"/>
+        <lang.documentationProvider
+                language="DependencyHelperDocumentation"
+                implementationClass="org.knifefish.dependency.helper.documentation.DependencyDocumentationProvider"/>
     </extensions>
 
     <actions>
