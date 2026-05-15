@@ -9,7 +9,7 @@ plugins {
 dependencies {
     testImplementation("junit:junit:4.13.2")
     implementation("org.jetbrains.kotlinx:kotlinx-html-jvm:0.12.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.1")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
 
     // IntelliJ Platform Gradle Plugin Dependencies Extension - read more: https://plugins.jetbrains.com/docs/intellij/tools-intellij-platform-gradle-plugin-dependencies-extension.html
     intellijPlatform {
