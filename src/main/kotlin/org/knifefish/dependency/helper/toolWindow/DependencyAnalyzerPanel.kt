@@ -24,10 +24,10 @@ import org.knifefish.dependency.helper.model.Ecosystem
 import org.knifefish.dependency.helper.model.LatestVersionPolicy
 import org.knifefish.dependency.helper.model.MavenDependencyNodeView
 import org.knifefish.dependency.helper.model.PackageSearchResult
-import org.knifefish.dependency.helper.scanner.DependencyFileScanner
 import org.knifefish.dependency.helper.services.DependencyInsightService
 import org.knifefish.dependency.helper.services.GradleSupport
 import org.knifefish.dependency.helper.services.MavenSupport
+import org.knifefish.dependency.helper.services.external.ExternalDependencySystems
 import org.knifefish.dependency.helper.services.hasRecommendedUpgrade
 import java.awt.*
 import java.awt.event.KeyAdapter
@@ -75,7 +75,7 @@ class DependencyAnalyzerPanel(
     private var latestVersionByKey: Map<String, String> = emptyMap()
     private var conflictKeys: Set<String> = emptySet()
     private val artifactSizeLabelByCoordinate = mutableMapOf<String, String>()
-    private val dependencyScanner = DependencyFileScanner()
+    private val externalSystems = ExternalDependencySystems(project)
 
     init {
         analysisRelationTree.isRootVisible = false
@@ -86,6 +86,10 @@ class DependencyAnalyzerPanel(
         tabs.add(message("Panel.Tab.Search"), buildSearchPanel())
         setContent(tabs)
 
+        reloadDependencies()
+    }
+
+    fun refreshDependencies() {
         reloadDependencies()
     }
 
@@ -171,7 +175,7 @@ class DependencyAnalyzerPanel(
             }, BorderLayout.WEST)
             add(
                 JPanel(FlowLayout(FlowLayout.RIGHT, 0, 0)).apply {
-                    add(
+                    /*add(
                         JButton(message("Button.Donate")).apply {
                             toolTipText = message("Tooltip.Support")
                             addActionListener {
@@ -182,7 +186,7 @@ class DependencyAnalyzerPanel(
                                 )
                             }
                         },
-                    )
+                    )*/
                 },
                 BorderLayout.EAST,
             )
@@ -200,6 +204,13 @@ class DependencyAnalyzerPanel(
                 add(JBLabel(message("Label.Latest")))
                 add(latestPolicyCombo)
             }, BorderLayout.EAST)
+        }
+
+        val currentEcosystem = currentDependencyTargetFile()?.let { externalSystems.ecosystemFor(it) }
+        if (currentEcosystem !in setOf(Ecosystem.MAVEN, Ecosystem.GRADLE)) {
+            return JPanel(BorderLayout()).apply {
+                add(firstRow, BorderLayout.NORTH)
+            }
         }
 
         return JPanel(GridLayout(2, 1, 0, 4)).apply {
@@ -273,6 +284,17 @@ class DependencyAnalyzerPanel(
                 analyzedRoots.filter { it.ownerProjectFile.path == pomTarget.path }
                     .ifEmpty { buildFileRoots(pomTarget) }
             }
+            effectiveTargetFile?.name == "Cargo.toml" -> {
+                val cargoRoots = buildFileRoots(effectiveTargetFile)
+                if (cargoRoots.isEmpty()) {
+                    externalSystems.refresh(effectiveTargetFile) {
+                        ApplicationManager.getApplication().invokeLater {
+                            applyRoots(buildFileRoots(effectiveTargetFile))
+                        }
+                    }
+                }
+                cargoRoots
+            }
             effectiveTargetFile != null -> {
                 thisLogger().info("DependencyHelper reloadDependencies branch: fileRoots file=${effectiveTargetFile.path}")
                 buildFileRoots(effectiveTargetFile)
@@ -287,8 +309,8 @@ class DependencyAnalyzerPanel(
 
     private fun activeDependencyFile(): com.intellij.openapi.vfs.VirtualFile? {
         val selectedFile = FileEditorManager.getInstance(project).selectedFiles.firstOrNull() ?: return null
-        thisLogger().info("DependencyHelper activeDependencyFile: selected=${selectedFile.path}, supported=${dependencyScanner.supports(selectedFile)}")
-        return selectedFile.takeIf { dependencyScanner.supports(it) }
+        thisLogger().info("DependencyHelper activeDependencyFile: selected=${selectedFile.path}, supported=${externalSystems.supports(selectedFile)}")
+        return selectedFile.takeIf { externalSystems.supports(it) }
     }
 
     private fun resolveGradleDisplayFile(file: com.intellij.openapi.vfs.VirtualFile?): com.intellij.openapi.vfs.VirtualFile? {
@@ -603,12 +625,19 @@ class DependencyAnalyzerPanel(
         return currentFile ?: com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project)
             .selectedFiles
             .firstOrNull { file ->
-                file.name in setOf("pom.xml", "build.gradle", "build.gradle.kts", "package.json", "requirements.txt", "pyproject.toml", "Cargo.toml")
+                file.name in setOf("pom.xml", "build.gradle", "build.gradle.kts", "package.json", "Cargo.toml")
             }
     }
 
     private fun currentSearchEcosystem(): Ecosystem? {
-        return currentDependencyTargetFile()?.let(dependencyScanner::detectEcosystem)
+        val file = currentDependencyTargetFile() ?: return null
+        return when (file.name) {
+            "pom.xml" -> Ecosystem.MAVEN
+            "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts" -> Ecosystem.GRADLE
+            "package.json" -> Ecosystem.NPM
+            "Cargo.toml" -> Ecosystem.RUST
+            else -> null
+        }
     }
 
     private fun addSearchResult(rowIndex: Int) {

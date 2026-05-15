@@ -7,7 +7,6 @@ enum class Ecosystem(private val bundleKey: String) {
     MAVEN("Ecosystem.Maven"),
     GRADLE("Ecosystem.Gradle"),
     NPM("Ecosystem.Npm"),
-    PYTHON("Ecosystem.Python"),
     RUST("Ecosystem.Rust");
 
     val displayName: String

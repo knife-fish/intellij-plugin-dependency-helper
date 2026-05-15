@@ -14,6 +14,7 @@ import com.intellij.psi.xml.XmlFile
 import com.intellij.psi.xml.XmlTag
 import com.intellij.testFramework.LightVirtualFile
 import org.jetbrains.idea.maven.dom.MavenDomUtil
+import org.jetbrains.idea.maven.dom.model.MavenDomDependency
 import org.jetbrains.idea.maven.model.MavenArtifact
 import org.jetbrains.idea.maven.model.MavenArtifactNode
 import org.jetbrains.idea.maven.project.MavenProject
@@ -21,18 +22,18 @@ import org.jetbrains.idea.maven.project.MavenProjectsManager
 import org.knifefish.dependency.helper.model.DependencyCoordinate
 import org.knifefish.dependency.helper.model.Ecosystem
 import org.knifefish.dependency.helper.model.MavenDependencyNodeView
+import org.knifefish.dependency.helper.model.TextRangeMarker
 
 class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
 
-    private val manager: MavenProjectsManager
-        get() = MavenProjectsManager.getInstance(project)
+    private fun mavenProjectsManager(): MavenProjectsManager = MavenProjectsManager.getInstance(project)
 
     override fun enrichDependencies(file: VirtualFile, dependencies: List<DependencyCoordinate>): List<DependencyCoordinate> {
         if (file.name != "pom.xml") {
             return dependencies
         }
         return ReadAction.compute<List<DependencyCoordinate>, RuntimeException> {
-            val mavenProject = manager.findProject(file) ?: return@compute dependencies
+            val mavenProject = mavenProjectsManager().findProject(file) ?: return@compute dependencies
             dependencies.map { dependency ->
                 if (dependency.ecosystem != Ecosystem.MAVEN || dependency.version.isNotBlank()) {
                     dependency
@@ -46,7 +47,7 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
 
     override fun analyze(): List<MavenDependencyNodeView> {
         return ReadAction.compute<List<MavenDependencyNodeView>, RuntimeException> {
-            manager.projects.map { projectNode ->
+            mavenProjectsManager().projects.map { projectNode ->
                 val directDependencies = directDependenciesByKey(projectNode)
                 buildProjectNodes(projectNode, directDependencies)
             }
@@ -271,9 +272,45 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
     }
 
     private fun directDependenciesByKey(mavenProject: MavenProject): Map<String, DependencyCoordinate> {
-        return project.dependencyInsightService().scanFile(mavenProject.file)
-            .filter { it.ecosystem == Ecosystem.MAVEN }
+        return declaredDependenciesFromMavenModel(mavenProject.file)
+            .let { enrichDependencies(mavenProject.file, it) }
             .associateBy { "${it.group}:${it.name}" }
+    }
+
+    private fun declaredDependenciesFromMavenModel(file: VirtualFile): List<DependencyCoordinate> {
+        val model = MavenDomUtil.getMavenDomProjectModel(project, file) ?: return emptyList()
+        val source = model.xmlTag?.containingFile?.text.orEmpty()
+        return model.dependencies.dependencies.mapNotNull { dependency ->
+            dependency.toCoordinate(file, source)
+        }
+    }
+
+    private fun MavenDomDependency.toCoordinate(file: VirtualFile, source: String): DependencyCoordinate? {
+        val group = getGroupId().stringValue?.trim()
+        val artifact = getArtifactId().stringValue?.trim()
+        if (group.isNullOrBlank() || artifact.isNullOrBlank()) {
+            return null
+        }
+
+        val declaredVersion = getVersion().stringValue?.trim()
+        val versionRange = getVersion().xmlTag?.value?.textRange?.let { TextRangeMarker(it.startOffset, it.endOffset) }
+        val fallbackOffset = getArtifactId().xmlTag?.value?.textRange?.endOffset ?: xmlTag?.textRange?.endOffset ?: 0
+        val displayRange = versionRange ?: TextRangeMarker(fallbackOffset, fallbackOffset)
+        val declarationRange = xmlTag?.textRange?.let { TextRangeMarker(it.startOffset, it.endOffset) } ?: displayRange
+        return DependencyCoordinate(
+            ecosystem = Ecosystem.MAVEN,
+            group = group,
+            name = artifact,
+            version = declaredVersion.orEmpty(),
+            declaredVersion = declaredVersion,
+            scope = getScope().stringValue?.trim(),
+            file = file,
+            declarationText = xmlTag?.text?.trim().orEmpty(),
+            lineNumber = source.take(displayRange.startOffset).count { it == '\n' } + 1,
+            versionRange = versionRange,
+            displayRange = displayRange,
+            inspectionRange = declarationRange,
+        )
     }
 
     private fun findDependencyTag(xmlFile: XmlFile, groupId: String, artifactId: String): XmlTag? {
@@ -337,14 +374,14 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
         val parentNode = analyze().asSequence().flatMap { flatten(it).asSequence() }
             .firstOrNull { it.groupId == parentGroupId && it.artifactId == parentArtifactId } ?: return false
         val reactorPom = ReadAction.compute<VirtualFile?, RuntimeException> {
-            manager.findProject(
+            mavenProjectsManager().findProject(
                 MavenArtifact(parentGroupId, parentArtifactId, parentNode.version, "jar", null, parentNode.scope ?: "compile", null, false, "jar", null, null, true, false),
             )?.file
         }
         if (reactorPom != null) {
             return openFile(reactorPom, 1)
         }
-        val pomPath = manager.repositoryPath
+        val pomPath = mavenProjectsManager().repositoryPath
             .resolve(parentGroupId.replace('.', '/'))
             .resolve(parentArtifactId)
             .resolve(parentNode.version)
@@ -355,7 +392,7 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
 
     private fun openReactorPom(view: MavenDependencyNodeView): Boolean {
         val reactorProject = ReadAction.compute<MavenProject?, RuntimeException> {
-            manager.findProject(
+            mavenProjectsManager().findProject(
                 MavenArtifact(view.groupId, view.artifactId, view.version, "jar", null, view.scope ?: "compile", null, false, "jar", null, null, true, false),
             )
         } ?: return false
@@ -388,12 +425,12 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
 
     private fun resolveVersionWriteTag(file: VirtualFile, versionTag: XmlTag): XmlTag {
         val rawText = versionTag.value.text.trim()
-        val propertyName = PROPERTY_REF.matchEntire(rawText)?.groupValues?.get(1) ?: return versionTag
+        val propertyName = extractPropertyReference(rawText) ?: return versionTag
         return findPropertyTag(file, propertyName, mutableSetOf()) ?: versionTag
     }
 
     private fun workspaceInheritanceChain(startFile: VirtualFile): List<MavenProject> {
-        val startProject = manager.findProject(startFile) ?: return emptyList()
+        val startProject = mavenProjectsManager().findProject(startFile) ?: return emptyList()
         val result = mutableListOf<MavenProject>()
         val seen = mutableSetOf<String>()
         var current: MavenProject? = startProject
@@ -407,7 +444,7 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
     }
 
     private fun findWorkspaceProject(groupId: String, artifactId: String, version: String): MavenProject? {
-        return manager.findProject(
+        return mavenProjectsManager().findProject(
             MavenArtifact(groupId, artifactId, version, "pom", null, "compile", null, false, "pom", null, null, true, false),
         )
     }
@@ -439,7 +476,7 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
         dependency: DependencyCoordinate,
     ): Boolean {
         val parentXml = resolvePomReference(parent) ?: return false
-        val workspaceProject = parentXml.virtualFile?.let(manager::findProject) ?: return false
+        val workspaceProject = parentXml.virtualFile?.let(mavenProjectsManager()::findProject) ?: return false
         val descriptor = readProjectDescriptor(workspaceProject.file) ?: return false
         return descriptor.importedBoms.any { bom -> bomRecursivelyManagesDependency(bom, dependency) } ||
             (descriptor.parent?.let { directParent -> parentRecursivelyManagesDependency(directParent, dependency) } == true)
@@ -507,7 +544,7 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
     }
 
     private fun resolveLocalPom(reference: PomReference): VirtualFile? {
-        val pomPath = manager.repositoryPath
+        val pomPath = mavenProjectsManager().repositoryPath
             .resolve(reference.groupId.replace('.', '/'))
             .resolve(reference.artifactId)
             .resolve(reference.version)
@@ -516,13 +553,13 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
     }
 
     override fun refreshMavenProject(file: VirtualFile, afterRefresh: (() -> Unit)?) {
-        val mavenProject = ReadAction.compute<MavenProject?, RuntimeException> { manager.findProject(file) } ?: run {
+        val mavenProject = ReadAction.compute<MavenProject?, RuntimeException> { mavenProjectsManager().findProject(file) } ?: run {
             afterRefresh?.invoke()
             return
         }
         if (afterRefresh != null) {
             val disposable = Disposer.newDisposable("dependency-helper-maven-refresh")
-            manager.addManagerListener(object : MavenProjectsManager.Listener {
+            mavenProjectsManager().addManagerListener(object : MavenProjectsManager.Listener {
                 override fun projectImportCompleted() {
                     Disposer.dispose(disposable)
                     ApplicationManager.getApplication().invokeLater {
@@ -531,7 +568,7 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
                 }
             }, disposable)
         }
-        manager.scheduleForceUpdateMavenProject(mavenProject)
+        mavenProjectsManager().scheduleForceUpdateMavenProject(mavenProject)
     }
 
     private data class ExcludeState(
@@ -546,7 +583,14 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
     )
 }
 
-private val PROPERTY_REF = Regex("""\$\{([^}]+)}""")
+private fun extractPropertyReference(text: String): String? {
+    val trimmed = text.trim()
+    if (!trimmed.startsWith("\${") || !trimmed.endsWith("}")) {
+        return null
+    }
+    val inner = trimmed.substring(2, trimmed.length - 1).trim()
+    return inner.takeIf { it.isNotEmpty() && it.none { ch -> ch.isWhitespace() } }
+}
 
 internal fun parseProjectDescriptor(xmlFile: XmlFile): ProjectDescriptor? {
     val root = xmlFile.rootTag ?: return null
@@ -659,9 +703,7 @@ internal class PomPropertyResolver private constructor(
         }
         var resolved: String = value
         repeat(8) {
-            val updated = PROPERTY_PATTERN.replace(resolved) { match ->
-                values[match.groupValues[1]] ?: match.value
-            }
+            val updated = replaceProperties(resolved)
             if (updated == resolved) {
                 return updated
             }
@@ -670,9 +712,34 @@ internal class PomPropertyResolver private constructor(
         return resolved
     }
 
-    companion object {
-        private val PROPERTY_PATTERN = Regex("""\$\{([^}]+)}""")
+    private fun replaceProperties(input: String): String {
+        val sb = StringBuilder(input.length)
+        var i = 0
+        while (i < input.length) {
+            val start = input.indexOf("\${", i)
+            if (start < 0) {
+                sb.append(input, i, input.length)
+                break
+            }
+            sb.append(input, i, start)
+            val end = input.indexOf('}', start + 2)
+            if (end < 0) {
+                sb.append(input.substring(start))
+                break
+            }
+            val key = input.substring(start + 2, end).trim()
+            val replacement = values[key]
+            if (replacement != null) {
+                sb.append(replacement)
+            } else {
+                sb.append(input, start, end + 1)
+            }
+            i = end + 1
+        }
+        return sb.toString()
+    }
 
+    companion object {
         fun from(root: XmlTag, rawParent: PomReference?): PomPropertyResolver {
             val values = linkedMapOf<String, String>()
             val rawGroupId = root.findFirstSubTag("groupId")?.value?.text?.trim().orEmpty()
@@ -704,6 +771,7 @@ internal class PomPropertyResolver private constructor(
                 }
             return PomPropertyResolver(values)
         }
+
     }
 }
 

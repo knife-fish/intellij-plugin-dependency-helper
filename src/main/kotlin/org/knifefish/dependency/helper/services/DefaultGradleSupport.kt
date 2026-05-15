@@ -32,7 +32,6 @@ import org.jetbrains.plugins.gradle.util.GradleModuleData
 import org.knifefish.dependency.helper.model.DependencyCoordinate
 import org.knifefish.dependency.helper.model.MavenDependencyNodeView
 import org.knifefish.dependency.helper.model.TextRangeMarker
-import org.knifefish.dependency.helper.scanner.DependencyFileScanner
 import java.nio.file.Path
 import java.nio.file.Paths
 
@@ -93,10 +92,9 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
             return buildDeclaredDependencyRoots(file)
         }
 
-        val directDependencies = enrichDependencies(
-            file,
-            DependencyFileScanner().scan(file, file.inputStream.bufferedReader().use { it.readText() }),
-        )
+        // Gradle 解析后的依赖树不一定保留“直接声明依赖”的边界，
+        // 这里先从脚本文本提取直接依赖，再把解析树节点映射回这些直接依赖。
+        val directDependencies = declaredDependencies(file)
         val directDependenciesByIdentity = directDependencies.associateBy { dependencyIdentity(it.group, it.name, it.version) }
         val directDependenciesByKey = directDependencies.associateBy { dependencyKey(it.group, it.name) }
         val projectName = file.name
@@ -113,6 +111,7 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
             sourceDependency = null,
         )
         val sourceNodesById = mutableMapOf<Long, DependencyNode>()
+        val resolvedDirectNodes = mutableListOf<MavenDependencyNodeView>()
         val occurrenceTreesByDirectKey = linkedMapOf<String, MutableList<MavenDependencyNodeView>>()
         scopeNodes.forEach { scopeNode ->
             scopeNode.dependencies.forEach { dependencyNode ->
@@ -127,6 +126,7 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
                     sourceNodesById = sourceNodesById,
                     visitingIds = linkedSetOf(),
                 )
+                resolvedDirectNodes += occurrence
                 val directKey = directDependencyKey(occurrence, directDependenciesByIdentity, directDependenciesByKey)
                 if (directKey != null) {
                     occurrenceTreesByDirectKey.getOrPut(directKey) { mutableListOf() }.add(occurrence)
@@ -152,6 +152,13 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
                 }
             }
             root.children += rootChild
+        }
+        resolvedDirectNodes.forEach { occurrence ->
+            val directKey = dependencyKey(occurrence.groupId, occurrence.artifactId)
+            if (directDependenciesByKey.containsKey(directKey)) {
+                return@forEach
+            }
+            mergeInto(root.children, occurrence)
         }
         thisLogger().info(
             "DependencyHelper Gradle analyze: file=${file.path}, analysisFile=${analysisFile.path}, projectPath=$projectPath, " +
@@ -179,6 +186,13 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
                 enriched.joinToString { "${it.declaredVersion ?: it.displayName}=>${it.displayName}:${it.version.ifBlank { "unknown" }}" },
         )
         return enriched
+    }
+
+    override fun declaredDependencies(file: VirtualFile): List<DependencyCoordinate> {
+        if (!isGradleFile(file)) {
+            return emptyList()
+        }
+        return enrichDependencies(file, collectDeclaredGradleDependencies(file, resolveAnalysisFile(file)))
     }
 
     override fun upgradeDependency(dependency: DependencyCoordinate, newVersion: String): Boolean {
@@ -234,9 +248,7 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
         val propertyFile = findGradlePropertiesFile(file)
         if (propertyFile != null) {
             val document = FileDocumentManager.getInstance().getDocument(propertyFile) ?: return false
-            val match = GRADLE_PROPERTY_LINE_REGEX(propertyName).find(document.text) ?: return false
-            val valueStart = match.range.first + match.groupValues[1].length
-            val valueRange = TextRangeMarker(valueStart, valueStart + match.groupValues[2].length)
+            val valueRange = findGradlePropertyAssignmentRange(document.text, propertyName) ?: return false
             WriteCommandAction.runWriteCommandAction(project, Runnable {
                 document.replaceString(valueRange.startOffset, valueRange.endOffset, newVersion)
                 FileDocumentManager.getInstance().saveDocument(document)
@@ -246,8 +258,7 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
         }
 
         val document = FileDocumentManager.getInstance().getDocument(file) ?: return false
-        val match = localGradlePropertyRegex(propertyName).find(document.text) ?: return false
-        val valueRange = TextRangeMarker(match.range.first + match.groupValues[1].length, match.range.first + match.groupValues[1].length + match.groupValues[2].length)
+        val valueRange = findKotlinPropertyAssignmentRange(document.text, propertyName) ?: return false
         WriteCommandAction.runWriteCommandAction(project, Runnable {
             document.replaceString(valueRange.startOffset, valueRange.endOffset, newVersion)
             FileDocumentManager.getInstance().saveDocument(document)
@@ -258,35 +269,27 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
 
     private fun replaceManagedPluginVersion(file: VirtualFile, dependency: DependencyCoordinate, newVersion: String): Boolean {
         val document = FileDocumentManager.getInstance().getDocument(file) ?: return false
-        val regexes = managedPluginVersionRegexes(dependency)
-        if (regexes.isEmpty()) {
+        if (dependency.group != "io.ktor" && dependency.group != "org.jetbrains.kotlin") {
             return false
         }
 
-        var updated = false
+        val keys = mutableListOf("id(\"io.ktor.plugin\") version", "id('io.ktor.plugin') version")
+        if (dependency.group == "org.jetbrains.kotlin") {
+            keys += "kotlin(\""
+            keys += "id(\"org.jetbrains.kotlin"
+            keys += "id('org.jetbrains.kotlin"
+        }
+        var updatedAny = false
         WriteCommandAction.runWriteCommandAction(project, Runnable {
-            var currentText = document.text
-            regexes.forEach { regex ->
-                val matches = regex.findAll(currentText).toList()
-                if (matches.isEmpty()) {
-                    return@forEach
-                }
-                matches.asReversed().forEach { match ->
-                    val start = match.range.first + match.groupValues[1].length
-                    val end = start + match.groupValues[2].length
-                    document.replaceString(start, end, newVersion)
-                    updated = true
-                    currentText = document.text
-                }
-            }
-            if (updated) {
-                FileDocumentManager.getInstance().saveDocument(document)
-            }
+            val range = findManagedPluginVersionRange(document.text, dependency.group.orEmpty()) ?: return@Runnable
+            document.replaceString(range.startOffset, range.endOffset, newVersion)
+            updatedAny = true
+            FileDocumentManager.getInstance().saveDocument(document)
         })
-        if (updated) {
+        if (updatedAny) {
             refreshGradleProject(file)
         }
-        return updated
+        return updatedAny
     }
 
     private fun replaceCatalogVersion(target: GradleCatalogUpgradeTarget, newVersion: String): Boolean {
@@ -294,24 +297,19 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
         val text = document.text
         val updated = when (target) {
             is GradleCatalogUpgradeTarget.VersionRef -> {
-                val regex = Regex("""(?m)^(\s*${Regex.escape(target.reference)}\s*=\s*["'])([^"']+)(["'])""")
-                val match = regex.find(text) ?: return false
-                val start = match.range.first + match.groupValues[1].length
-                val end = start + match.groupValues[2].length
+                val range = findTomlSimpleValueRange(text, target.reference) ?: return false
                 WriteCommandAction.runWriteCommandAction(project, Runnable {
-                    document.replaceString(start, end, newVersion)
+                    document.replaceString(range.startOffset, range.endOffset, newVersion)
                     FileDocumentManager.getInstance().saveDocument(document)
                 })
                 true
             }
             is GradleCatalogUpgradeTarget.LibraryVersion -> {
-                val lineRegex = Regex("""(?m)^(\s*${Regex.escape(target.alias)}\s*=\s*)(.+)$""")
-                val lineMatch = lineRegex.find(text) ?: return false
-                val body = lineMatch.groupValues[2]
-                val relativeMatch = Regex("""version\s*=\s*["']([^"']+)["']""").find(body)
-                    ?: return false
-                val start = lineMatch.range.first + lineMatch.groupValues[1].length + relativeMatch.range.first + relativeMatch.groupValues[0].indexOf(relativeMatch.groupValues[1])
-                val end = start + relativeMatch.groupValues[1].length
+                val lineRange = findTomlLineRange(text, target.alias) ?: return false
+                val body = text.substring(lineRange.startOffset, lineRange.endOffset)
+                val relative = findInlineTomlKeyValueRange(body, "version") ?: return false
+                val start = lineRange.startOffset + relative.startOffset
+                val end = lineRange.startOffset + relative.endOffset
                 WriteCommandAction.runWriteCommandAction(project, Runnable {
                     document.replaceString(start, end, newVersion)
                     FileDocumentManager.getInstance().saveDocument(document)
@@ -319,13 +317,11 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
                 true
             }
             is GradleCatalogUpgradeTarget.PluginVersion -> {
-                val lineRegex = Regex("""(?m)^(\s*${Regex.escape(target.alias)}\s*=\s*)(.+)$""")
-                val lineMatch = lineRegex.find(text) ?: return false
-                val body = lineMatch.groupValues[2]
-                val relativeMatch = Regex("""version\s*=\s*["']([^"']+)["']""").find(body)
-                    ?: return false
-                val start = lineMatch.range.first + lineMatch.groupValues[1].length + relativeMatch.range.first + relativeMatch.groupValues[0].indexOf(relativeMatch.groupValues[1])
-                val end = start + relativeMatch.groupValues[1].length
+                val lineRange = findTomlLineRange(text, target.alias) ?: return false
+                val body = text.substring(lineRange.startOffset, lineRange.endOffset)
+                val relative = findInlineTomlKeyValueRange(body, "version") ?: return false
+                val start = lineRange.startOffset + relative.startOffset
+                val end = lineRange.startOffset + relative.endOffset
                 WriteCommandAction.runWriteCommandAction(project, Runnable {
                     document.replaceString(start, end, newVersion)
                     FileDocumentManager.getInstance().saveDocument(document)
@@ -351,15 +347,35 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
         return updated
     }
 
-    private fun managedPluginVersionRegexes(dependency: DependencyCoordinate): List<Regex> = when {
-        dependency.group == "io.ktor" -> listOf(
-            Regex("""(id\("io\.ktor\.plugin"\)\s+version\s+["'])([^"']+)(["'])"""),
-        )
-        dependency.group == "org.jetbrains.kotlin" -> listOf(
-            Regex("""(kotlin\("[^"]+"\)\s+version\s+["'])([^"']+)(["'])"""),
-            Regex("""(id\("org\.jetbrains\.kotlin[^"]*"\)\s+version\s+["'])([^"']+)(["'])"""),
-        )
-        else -> emptyList()
+    private fun findManagedPluginVersionRange(text: String, dependencyGroup: String): TextRangeMarker? {
+        fun rangeAfterVersionKeyword(start: Int): TextRangeMarker? {
+            val versionIndex = text.indexOf("version", start)
+            if (versionIndex < 0) return null
+            val quote1 = text.indexOfAny(charArrayOf('"', '\''), versionIndex).takeIf { it >= 0 } ?: return null
+            val valueStart = quote1 + 1
+            val quote2 = text.indexOf(text[quote1], valueStart).takeIf { it > valueStart } ?: return null
+            return TextRangeMarker(valueStart, quote2)
+        }
+        return when (dependencyGroup) {
+            "io.ktor" -> {
+                val idx = text.indexOf("id(\"io.ktor.plugin\")").takeIf { it >= 0 }
+                    ?: text.indexOf("id('io.ktor.plugin')").takeIf { it >= 0 }
+                    ?: return null
+                rangeAfterVersionKeyword(idx)
+            }
+            "org.jetbrains.kotlin" -> {
+                val kotlinIdx = text.indexOf("kotlin(\"").takeIf { it >= 0 }
+                if (kotlinIdx != null) {
+                    rangeAfterVersionKeyword(kotlinIdx)
+                } else {
+                    val idIdx = text.indexOf("id(\"org.jetbrains.kotlin").takeIf { it >= 0 }
+                        ?: text.indexOf("id('org.jetbrains.kotlin").takeIf { it >= 0 }
+                        ?: return null
+                    rangeAfterVersionKeyword(idIdx)
+                }
+            }
+            else -> null
+        }
     }
 
     private fun isGradleFile(file: VirtualFile): Boolean = file.name in GRADLE_FILE_NAMES
@@ -505,12 +521,17 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
         return result.toList()
     }
 
+    /** Gradle 解析模型不可用时，基于脚本文本构建声明依赖树。 */
     private fun buildDeclaredDependencyRoots(file: VirtualFile): List<MavenDependencyNodeView> {
-        val dependencies = enrichDependencies(file, DependencyFileScanner().scan(file, file.inputStream.bufferedReader().use { it.readText() }))
+        // Gradle 模型不可用时的兜底：直接展示脚本文本中的声明依赖。
+        // 关键变量：从脚本提取出的声明依赖列表。
+        val dependencies = declaredDependencies(file)
         if (dependencies.isEmpty()) {
             return emptyList()
         }
+        // 关键变量：分析根节点显示名称。
         val projectName = file.name
+        // 关键变量：树路径起点（当前文件路径）。
         val rootPath = listOf(file.path)
         val root = MavenDependencyNodeView(
             ownerProjectName = projectName,
@@ -537,6 +558,96 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
             )
         }
         return listOf(root)
+    }
+
+    /** 轻量提取 Gradle 脚本中的直接依赖声明，用于源码定位和 editor inlay。 */
+    private fun collectDeclaredGradleDependencies(ownerFile: VirtualFile, sourceFile: VirtualFile): List<DependencyCoordinate> {
+        if (!isGradleFile(sourceFile)) return emptyList()
+        val text = runCatching { sourceFile.inputStream.bufferedReader().use { it.readText() } }.getOrNull() ?: return emptyList()
+        val dependencies = mutableListOf<DependencyCoordinate>()
+        var lineStart = 0
+        var lineNumber = 1
+        while (lineStart < text.length) {
+            val lineEnd = text.indexOf('\n', lineStart).let { if (it < 0) text.length else it }
+            val line = text.substring(lineStart, lineEnd)
+            dependencyFromGradleLine(ownerFile, line, lineStart, lineEnd, lineNumber)?.let(dependencies::add)
+            lineStart = lineEnd + 1
+            lineNumber++
+        }
+        return dependencies.distinctBy { "${it.scope}:${it.declaredVersion}:${it.inspectionRange.startOffset}" }
+    }
+
+    private fun dependencyFromGradleLine(
+        ownerFile: VirtualFile,
+        line: String,
+        lineStart: Int,
+        lineEnd: Int,
+        lineNumber: Int,
+    ): DependencyCoordinate? {
+        val trimmed = line.trimStart()
+        if (trimmed.startsWith("//") || trimmed.startsWith("*")) {
+            return null
+        }
+        val scope = trimmed.takeWhile { it.isLetterOrDigit() || it == '_' || it == '.' }
+        if (scope.isBlank()) {
+            return null
+        }
+        val rest = trimmed.drop(scope.length).trimStart()
+        val declaration = line.trim()
+        val inspectionRange = TextRangeMarker(lineStart, lineEnd)
+        val coordinate = firstQuotedValue(rest)?.takeIf { it.count { ch -> ch == ':' } >= 1 }
+        if (coordinate != null) {
+            val parts = coordinate.split(':')
+            if (parts.size >= 2) {
+                val version = parts.getOrNull(2).orEmpty()
+                val displayOffset = if (version.isNotBlank()) {
+                    line.lastIndexOf(version).takeIf { it >= 0 }?.let { lineStart + it }
+                } else {
+                    line.lastIndexOf(parts[1]).takeIf { it >= 0 }?.let { lineStart + it + parts[1].length }
+                } ?: lineEnd
+                val range = if (version.isNotBlank()) TextRangeMarker(displayOffset, displayOffset + version.length) else null
+                return DependencyCoordinate(
+                    ecosystem = org.knifefish.dependency.helper.model.Ecosystem.GRADLE,
+                    group = parts[0],
+                    name = parts[1],
+                    version = version,
+                    declaredVersion = version.takeIf { it.isNotBlank() },
+                    scope = scope,
+                    file = ownerFile,
+                    declarationText = declaration,
+                    lineNumber = lineNumber,
+                    versionRange = range,
+                    displayRange = range ?: TextRangeMarker(displayOffset, displayOffset),
+                    inspectionRange = inspectionRange,
+                )
+            }
+        }
+
+        val accessor = GRADLE_CATALOG_ACCESSOR_PATTERN.find(rest)?.groupValues?.get(1) ?: return null
+        val accessorStart = line.indexOf(accessor).takeIf { it >= 0 } ?: return null
+        val displayOffset = lineStart + accessorStart + accessor.length
+        return DependencyCoordinate(
+            ecosystem = org.knifefish.dependency.helper.model.Ecosystem.GRADLE,
+            group = null,
+            name = accessor.substringAfterLast('.'),
+            version = "",
+            declaredVersion = accessor,
+            scope = scope,
+            file = ownerFile,
+            declarationText = declaration,
+            lineNumber = lineNumber,
+            versionRange = null,
+            displayRange = TextRangeMarker(displayOffset, displayOffset),
+            inspectionRange = inspectionRange,
+        )
+    }
+
+    private fun firstQuotedValue(text: String): String? {
+        val quote = text.indexOfAny(charArrayOf('"', '\''))
+        if (quote < 0) return null
+        val end = text.indexOf(text[quote], quote + 1)
+        if (end <= quote) return null
+        return text.substring(quote + 1, end)
     }
 
     private fun buildResolvedGradleNode(
@@ -869,9 +980,9 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
         val GRADLE_SYSTEM_ID = ProjectSystemId("GRADLE")
         val GRADLE_FILE_NAMES = setOf("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts")
         val GRADLE_SETTINGS_FILE_NAMES = setOf("settings.gradle", "settings.gradle.kts")
+        val GRADLE_CATALOG_ACCESSOR_PATTERN = Regex("""(?:\w+\(\s*)?([A-Za-z][A-Za-z0-9_]*\.[A-Za-z0-9_.-]+)""")
         const val MAX_GRADLE_TREE_DEPTH = 4
         const val MAX_GRADLE_CHILDREN_PER_NODE = 50
-        fun GRADLE_PROPERTY_LINE_REGEX(name: String) = Regex("""(?m)^(\s*${Regex.escape(name)}\s*=\s*)([^\r\n#]+)""")
     }
 }
 
@@ -960,20 +1071,11 @@ internal fun parseGradleVersionContext(
             }
         }
 
-    Regex("""(?m)^\s*val\s+([A-Za-z0-9_.-]+)\s*=\s*["']([^"']+)["']""")
-        .findAll(buildText)
-        .forEach { match -> properties[match.groupValues[1]] = match.groupValues[2] }
+    extractGradleValAssignments(buildText).forEach { (key, value) -> properties[key] = value }
+    extractGradleExtraAssignments(buildText).forEach { (key, value) -> properties[key] = value }
 
-    Regex("""(?m)^\s*extra\[\s*["']([A-Za-z0-9_.-]+)["']\s*]\s*=\s*["']([^"']+)["']""")
-        .findAll(buildText)
-        .forEach { match -> properties[match.groupValues[1]] = match.groupValues[2] }
-
-    val kotlinPluginVersion =
-        Regex("""kotlin\("([^"]+)"\)\s+version\s+["']([^"']+)["']""").find(buildText)?.groupValues?.get(2)
-            ?: Regex("""id\("org\.jetbrains\.kotlin[^"]*"\)\s+version\s+["']([^"']+)["']""").find(buildText)?.groupValues?.get(1)
-
-    val ktorPluginVersion =
-        Regex("""id\("io\.ktor\.plugin"\)\s+version\s+["']([^"']+)["']""").find(buildText)?.groupValues?.get(1)
+    val kotlinPluginVersion = extractKotlinPluginVersion(buildText)
+    val ktorPluginVersion = extractPluginVersion(buildText, "io.ktor.plugin")
 
     val catalogs = versionCatalogs.mapValues { (_, source) -> parseVersionCatalog(source.text) }
 
@@ -983,6 +1085,94 @@ internal fun parseGradleVersionContext(
         kotlinPluginVersion = kotlinPluginVersion,
         ktorPluginVersion = ktorPluginVersion,
     )
+}
+
+private fun extractGradleValAssignments(buildText: String): Map<String, String> {
+    val values = linkedMapOf<String, String>()
+    buildText.lineSequence().forEach { raw ->
+        val line = raw.trim()
+        if (!line.startsWith("val ")) return@forEach
+        val rest = line.removePrefix("val ").trim()
+        val eq = rest.indexOf('=')
+        if (eq <= 0) return@forEach
+        val key = rest.substring(0, eq).trim()
+        val value = quotedValue(rest.substring(eq + 1)) ?: return@forEach
+        if (key.isNotBlank()) values[key] = value
+    }
+    return values
+}
+
+private fun extractGradleExtraAssignments(buildText: String): Map<String, String> {
+    val values = linkedMapOf<String, String>()
+    buildText.lineSequence().forEach { raw ->
+        val line = raw.trim()
+        if (!line.startsWith("extra[")) return@forEach
+        val keyStart = line.indexOfAny(charArrayOf('"', '\''))
+        if (keyStart < 0) return@forEach
+        val keyQuote = line[keyStart]
+        val keyEnd = line.indexOf(keyQuote, keyStart + 1)
+        if (keyEnd <= keyStart + 1) return@forEach
+        val key = line.substring(keyStart + 1, keyEnd)
+        val eq = line.indexOf('=', keyEnd + 1)
+        if (eq < 0) return@forEach
+        val value = quotedValue(line.substring(eq + 1)) ?: return@forEach
+        if (key.isNotBlank()) values[key] = value
+    }
+    return values
+}
+
+private fun extractKotlinPluginVersion(buildText: String): String? {
+    return extractVersionAfterPrefix(buildText, "kotlin(\"")
+        ?: extractPluginVersion(buildText, "org.jetbrains.kotlin")
+}
+
+private fun extractPluginVersion(buildText: String, pluginIdPrefix: String): String? {
+    buildText.lineSequence().forEach { raw ->
+        val line = raw.trim()
+        if (!line.contains("id(")) return@forEach
+        val id = extractIdCallArgument(line) ?: return@forEach
+        if (!(id == pluginIdPrefix || id.startsWith("$pluginIdPrefix."))) return@forEach
+        val version = extractVersionAfterKeyword(line)
+        if (!version.isNullOrBlank()) return version
+    }
+    return null
+}
+
+private fun extractIdCallArgument(line: String): String? {
+    val idIndex = line.indexOf("id(")
+    if (idIndex < 0) return null
+    val start = line.indexOfAny(charArrayOf('"', '\''), idIndex + 3)
+    if (start < 0) return null
+    val quote = line[start]
+    val end = line.indexOf(quote, start + 1)
+    if (end <= start + 1) return null
+    return line.substring(start + 1, end)
+}
+
+private fun extractVersionAfterPrefix(buildText: String, prefix: String): String? {
+    buildText.lineSequence().forEach { raw ->
+        val line = raw.trim()
+        val idx = line.indexOf(prefix)
+        if (idx < 0) return@forEach
+        val version = extractVersionAfterKeyword(line)
+        if (!version.isNullOrBlank()) return version
+    }
+    return null
+}
+
+private fun extractVersionAfterKeyword(line: String): String? {
+    val idx = line.indexOf("version")
+    if (idx < 0) return null
+    return quotedValue(line.substring(idx + "version".length))
+}
+
+private fun quotedValue(text: String): String? {
+    val start = text.indexOfAny(charArrayOf('"', '\''))
+    if (start < 0) return null
+    val quote = text[start]
+    val end = text.indexOf(quote, start + 1)
+    if (end <= start + 1) return null
+    return text.substring(start + 1, end)
 }
 
 internal fun resolveGradleDependencies(
@@ -1060,7 +1250,15 @@ internal fun resolveGradleDependencies(
 }
 
 internal fun gradlePropertyName(versionExpression: String): String? {
-    return Regex("""^\$\{?([A-Za-z0-9_.-]+)}?$""").matchEntire(versionExpression.trim())?.groupValues?.get(1)
+    val trimmed = versionExpression.trim()
+    if (trimmed.isEmpty()) return null
+    val inner = when {
+        trimmed.startsWith("\${") && trimmed.endsWith("}") -> trimmed.substring(2, trimmed.length - 1).trim()
+        trimmed.startsWith("$") -> trimmed.substring(1).trim()
+        else -> trimmed
+    }
+    if (inner.isEmpty()) return null
+    return if (inner.all { it.isLetterOrDigit() || it == '_' || it == '.' || it == '-' }) inner else null
 }
 
 internal data class GradleCatalogAccessor(
@@ -1082,137 +1280,214 @@ internal fun gradleCatalogAccessor(versionExpression: String?): GradleCatalogAcc
 
 private fun normalizeCatalogAlias(alias: String): String = alias.replace('-', '.').replace('_', '.')
 private fun denormalizeCatalogAlias(alias: String): String = alias.replace('.', '-')
-
 private fun parseVersionCatalog(versionCatalogText: String?): GradleVersionCatalog {
+    val sections = parseTomlSections(versionCatalogText.orEmpty())
     return GradleVersionCatalog(
-        versions = parseVersionCatalogVersions(versionCatalogText),
-        libraries = parseVersionCatalogLibraries(versionCatalogText),
-        bundles = parseVersionCatalogBundles(versionCatalogText),
-        plugins = parseVersionCatalogPlugins(versionCatalogText),
+        versions = parseVersionCatalogVersions(sections["versions"].orEmpty()),
+        libraries = parseVersionCatalogLibraries(sections["libraries"].orEmpty()),
+        bundles = parseVersionCatalogBundles(sections["bundles"].orEmpty()),
+        plugins = parseVersionCatalogPlugins(sections["plugins"].orEmpty()),
     )
 }
 
-private fun parseVersionCatalogVersions(versionCatalogText: String?): Map<String, String> {
-    val section = versionCatalogSection(versionCatalogText, "versions") ?: return emptyMap()
-    return Regex("""(?m)^\s*([A-Za-z0-9_.-]+)\s*=\s*["']([^"']+)["']\s*$""")
-        .findAll(section)
-        .associate { normalizeCatalogAlias(it.groupValues[1]) to it.groupValues[2].trim() }
+private fun parseVersionCatalogVersions(entries: Map<String, String>): Map<String, String> {
+    val result = linkedMapOf<String, String>()
+    entries.forEach { (key, value) ->
+        parseTomlString(value)?.let { result[normalizeCatalogAlias(key)] = it.trim() }
+    }
+    return result
 }
 
-private fun parseVersionCatalogLibraries(versionCatalogText: String?): Map<String, GradleCatalogLibrary> {
-    val section = versionCatalogSection(versionCatalogText, "libraries") ?: return emptyMap()
+private fun parseVersionCatalogLibraries(entries: Map<String, String>): Map<String, GradleCatalogLibrary> {
     val result = mutableMapOf<String, GradleCatalogLibrary>()
-    Regex("""(?m)^\s*([A-Za-z0-9_.-]+)\s*=\s*["']([^:"']+):([^:"']+):([^"']+)["']\s*$""")
-        .findAll(section)
-        .forEach { match ->
-            result[normalizeCatalogAlias(match.groupValues[1])] = GradleCatalogLibrary(
-                group = match.groupValues[2].trim(),
-                name = match.groupValues[3].trim(),
-                version = match.groupValues[4].trim(),
-                versionRef = null,
-            )
-        }
-    Regex("""(?m)^\s*([A-Za-z0-9_.-]+)\s*=\s*\{([^}]*)}\s*$""")
-        .findAll(section)
-        .forEach { match ->
-            val alias = normalizeCatalogAlias(match.groupValues[1])
-            val body = match.groupValues[2]
-            val module = Regex("""module\s*=\s*["']([^:"']+):([^"']+)["']""").find(body)
-            val group = Regex("""group\s*=\s*["']([^"']+)["']""").find(body)?.groupValues?.get(1)?.trim()
-            val name = Regex("""name\s*=\s*["']([^"']+)["']""").find(body)?.groupValues?.get(1)?.trim()
-            val version = Regex("""version\s*=\s*["']([^"']+)["']""").find(body)?.groupValues?.get(1)?.trim()
-            val versionRef = Regex("""version\.ref\s*=\s*["']([^"']+)["']""").find(body)?.groupValues?.get(1)?.trim()
-                ?.let(::normalizeCatalogAlias)
-            val resolvedGroup = module?.groupValues?.get(1)?.trim() ?: group
-            val resolvedName = module?.groupValues?.get(2)?.trim() ?: name
-            if (!resolvedGroup.isNullOrBlank() && !resolvedName.isNullOrBlank()) {
+    entries.forEach { (aliasRaw, rawValue) ->
+        val alias = normalizeCatalogAlias(aliasRaw)
+        val stringValue = parseTomlString(rawValue)
+        if (stringValue != null) {
+            val parts = stringValue.split(':')
+            if (parts.size >= 3) {
                 result[alias] = GradleCatalogLibrary(
-                    group = resolvedGroup,
-                    name = resolvedName,
-                    version = version,
-                    versionRef = versionRef,
+                    group = parts[0].trim(),
+                    name = parts[1].trim(),
+                    version = parts.subList(2, parts.size).joinToString(":").trim(),
+                    versionRef = null,
                 )
+            }
+            return@forEach
+        }
+        val table = parseTomlInlineTable(rawValue) ?: return@forEach
+        val module = table["module"]?.let(::parseTomlString)
+        val group = table["group"]?.let(::parseTomlString)?.trim()
+        val name = table["name"]?.let(::parseTomlString)?.trim()
+        val version = table["version"]?.let(::parseTomlString)?.trim()
+        val versionRef = tomlVersionRef(table)?.trim()?.let(::normalizeCatalogAlias)
+        val resolvedGroup = module?.substringBefore(':')?.trim()?.takeIf { it.isNotEmpty() } ?: group
+        val resolvedName = module?.substringAfter(':', "")?.trim()?.takeIf { it.isNotEmpty() } ?: name
+        if (!resolvedGroup.isNullOrBlank() && !resolvedName.isNullOrBlank()) {
+            result[alias] = GradleCatalogLibrary(
+                group = resolvedGroup,
+                name = resolvedName,
+                version = version,
+                versionRef = versionRef,
+            )
             }
         }
     return result
 }
 
-private fun parseVersionCatalogBundles(versionCatalogText: String?): Map<String, List<String>> {
-    val section = versionCatalogSection(versionCatalogText, "bundles") ?: return emptyMap()
-    return Regex("""(?m)^\s*([A-Za-z0-9_.-]+)\s*=\s*\[(.*?)]\s*$""")
-        .findAll(section)
-        .associate { match ->
-            val alias = normalizeCatalogAlias(match.groupValues[1])
-            val entries = Regex("""["']([^"']+)["']""")
-                .findAll(match.groupValues[2])
-                .map { normalizeCatalogAlias(it.groupValues[1]) }
-                .toList()
-            alias to entries
-        }
-}
-
-private fun parseVersionCatalogPlugins(versionCatalogText: String?): Map<String, GradleCatalogPlugin> {
-    val section = versionCatalogSection(versionCatalogText, "plugins") ?: return emptyMap()
-    val result = mutableMapOf<String, GradleCatalogPlugin>()
-    Regex("""(?m)^\s*([A-Za-z0-9_.-]+)\s*=\s*\{([^}]*)}\s*$""")
-        .findAll(section)
-        .forEach { match ->
-            val alias = normalizeCatalogAlias(match.groupValues[1])
-            val body = match.groupValues[2]
-            val id = Regex("""id\s*=\s*["']([^"']+)["']""").find(body)?.groupValues?.get(1)?.trim() ?: return@forEach
-            val version = Regex("""version\s*=\s*["']([^"']+)["']""").find(body)?.groupValues?.get(1)?.trim()
-            val versionRef = Regex("""version\.ref\s*=\s*["']([^"']+)["']""").find(body)?.groupValues?.get(1)?.trim()
-                ?.let(::normalizeCatalogAlias)
-            result[alias] = GradleCatalogPlugin(
-                id = id,
-                version = version,
-                versionRef = versionRef,
-            )
-        }
+private fun parseVersionCatalogBundles(entries: Map<String, String>): Map<String, List<String>> {
+    val result = linkedMapOf<String, List<String>>()
+    entries.forEach { (key, value) ->
+        result[normalizeCatalogAlias(key)] = parseTomlStringArray(value).map(::normalizeCatalogAlias)
+    }
     return result
 }
 
-private fun versionCatalogSection(versionCatalogText: String?, name: String): String? {
-    val text = versionCatalogText ?: return null
-    return Regex("""(?ms)^\[$name]\s*(.*?)(^\[[^]]+]\s*|\z)""").find(text)?.groupValues?.get(1)
+private fun parseVersionCatalogPlugins(entries: Map<String, String>): Map<String, GradleCatalogPlugin> {
+    val result = mutableMapOf<String, GradleCatalogPlugin>()
+    entries.forEach { (key, rawValue) ->
+        val table = parseTomlInlineTable(rawValue) ?: return@forEach
+        val id = table["id"]?.let(::parseTomlString)?.trim() ?: return@forEach
+        val version = table["version"]?.let(::parseTomlString)?.trim()
+        val versionRef = tomlVersionRef(table)?.trim()?.let(::normalizeCatalogAlias)
+        result[normalizeCatalogAlias(key)] = GradleCatalogPlugin(
+            id = id,
+            version = version,
+            versionRef = versionRef,
+        )
+    }
+    return result
+}
+
+private fun tomlVersionRef(table: Map<String, String>): String? {
+    val dotted = table["version.ref"]?.let(::parseTomlString)
+    if (!dotted.isNullOrBlank()) return dotted
+    val versionTable = table["version"]?.let(::parseTomlInlineTable)
+    return versionTable?.get("ref")?.let(::parseTomlString)
+}
+
+private fun parseTomlSections(text: String): Map<String, Map<String, String>> {
+    val result = linkedMapOf<String, LinkedHashMap<String, String>>()
+    var currentSection: String? = null
+    text.lineSequence().forEach { raw ->
+        val line = raw.substringBefore('#').trim()
+        if (line.isBlank()) return@forEach
+        if (line.startsWith("[") && line.endsWith("]")) {
+            currentSection = line.trim('[', ']').trim()
+            result.getOrPut(currentSection!!) { linkedMapOf() }
+            return@forEach
+        }
+        val section = currentSection ?: return@forEach
+        val eq = line.indexOf('=')
+        if (eq <= 0) return@forEach
+        val key = line.substring(0, eq).trim()
+        val value = line.substring(eq + 1).trim()
+        result.getOrPut(section) { linkedMapOf() }[key] = value
+    }
+    return result
+}
+
+private fun parseTomlString(raw: String): String? {
+    val value = raw.trim().trimEnd(',')
+    if (value.length < 2) return null
+    val quote = value.first()
+    if (quote != '"' && quote != '\'') return null
+    val end = value.indexOf(quote, 1)
+    if (end <= 0) return null
+    return value.substring(1, end)
+}
+
+private fun parseTomlStringArray(raw: String): List<String> {
+    val value = raw.trim()
+    if (!value.startsWith("[") || !value.endsWith("]")) return emptyList()
+    return splitTomlTopLevel(value.substring(1, value.length - 1))
+        .mapNotNull(::parseTomlString)
+}
+
+private fun parseTomlInlineTable(raw: String): Map<String, String>? {
+    val value = raw.trim()
+    if (!value.startsWith("{") || !value.endsWith("}")) return null
+    val result = linkedMapOf<String, String>()
+    splitTomlTopLevel(value.substring(1, value.length - 1)).forEach { entry ->
+        val eq = entry.indexOf('=')
+        if (eq <= 0) return@forEach
+        result[entry.substring(0, eq).trim()] = entry.substring(eq + 1).trim()
+    }
+    return result
+}
+
+private fun splitTomlTopLevel(text: String): List<String> {
+    val result = mutableListOf<String>()
+    var start = 0
+    var quote: Char? = null
+    var braceDepth = 0
+    var bracketDepth = 0
+    text.forEachIndexed { index, ch ->
+        when {
+            quote != null -> if (ch == quote) quote = null
+            ch == '"' || ch == '\'' -> quote = ch
+            ch == '{' -> braceDepth++
+            ch == '}' -> braceDepth--
+            ch == '[' -> bracketDepth++
+            ch == ']' -> bracketDepth--
+            ch == ',' && braceDepth == 0 && bracketDepth == 0 -> {
+                result += text.substring(start, index).trim()
+                start = index + 1
+            }
+        }
+    }
+    val tail = text.substring(start).trim()
+    if (tail.isNotEmpty()) result += tail
+    return result
 }
 
 private fun parseSettingsCatalogMappings(settingsFile: VirtualFile, settingsText: String): Map<String, String> {
     val baseDir = Paths.get(settingsFile.parent.path)
     val result = linkedMapOf<String, String>()
-    val directCreateRegex = Regex("""(?m)(?:create|maybeCreate)\(\s*["']([^"']+)["']\s*\)\s*\.from\(\s*(?:files\(\s*["']([^"']+\.toml)["']\s*\)|["']([^"']+:[^"']+:[^"']+)["'])\s*\)""")
-    directCreateRegex.findAll(settingsText).forEach { match ->
-        val name = match.groupValues[1].trim()
-        val path = match.groupValues[2].trim().ifBlank { null }
-        val coordinate = match.groupValues[3].trim().ifBlank { null }
-        when {
-            path != null -> result[name] = baseDir.resolve(path).normalize().toString()
-            coordinate != null -> result[name] = coordinate
+    val lines = settingsText.lines()
+    lines.forEachIndexed { index, raw ->
+        val line = raw.trim()
+        if (!(line.startsWith("create(") || line.startsWith("maybeCreate("))) return@forEachIndexed
+        val name = betweenFirstQuotes(line) ?: return@forEachIndexed
+        val fromPart = line.substringAfter(".from(", "").substringBeforeLast(")", "")
+        if (fromPart.isNotBlank()) {
+            parseCatalogFromClause(fromPart, baseDir)?.let { result[name] = it }
+            return@forEachIndexed
         }
-    }
-    val createRegex = Regex("""(?ms)(?:create|maybeCreate)\(\s*["']([^"']+)["']\s*\)\s*\{(.*?)}""")
-    createRegex.findAll(settingsText).forEach { match ->
-        val name = match.groupValues[1].trim()
-        if (result.containsKey(name)) {
-            return@forEach
-        }
-        val body = match.groupValues[2]
-        val path = Regex("""from\(\s*files\(\s*["']([^"']+\.toml)["']\s*\)\s*\)""")
-            .find(body)
-            ?.groupValues
-            ?.get(1)
-            ?.trim()
-        val coordinate = Regex("""from\(\s*["']([^"']+:[^"']+:[^"']+)["']\s*\)""")
-            .find(body)
-            ?.groupValues
-            ?.get(1)
-            ?.trim()
-        when {
-            path != null -> result[name] = baseDir.resolve(path).normalize().toString()
-            coordinate != null -> result[name] = coordinate
+        var j = index + 1
+        while (j < lines.size && !lines[j].contains("}")) {
+            val candidate = lines[j].trim()
+            if (candidate.startsWith("from(")) {
+                val arg = candidate.substringAfter("from(", "").substringBeforeLast(")", "")
+                parseCatalogFromClause(arg, baseDir)?.let { result[name] = it }
+                break
+            }
+            j++
         }
     }
     return result
+}
+
+private fun parseCatalogFromClause(raw: String, baseDir: Path): String? {
+    val trimmed = raw.trim()
+    if (trimmed.startsWith("files(")) {
+        val inner = trimmed.substringAfter("files(", "").substringBeforeLast(")", "")
+        val path = betweenFirstQuotes(inner) ?: return null
+        return baseDir.resolve(path).normalize().toString()
+    }
+    val coordinate = betweenFirstQuotes(trimmed) ?: return null
+    if (coordinate.count { it == ':' } >= 2) {
+        return coordinate
+    }
+    return null
+}
+
+private fun betweenFirstQuotes(text: String): String? {
+    val q1 = text.indexOfAny(charArrayOf('"', '\''))
+    if (q1 < 0) return null
+    val q2 = text.indexOf(text[q1], q1 + 1)
+    if (q2 <= q1) return null
+    return text.substring(q1 + 1, q2)
 }
 
 private sealed interface GradleCatalogUpgradeTarget {
@@ -1244,8 +1519,91 @@ private sealed interface GradleCatalogUpgradeTarget {
     ) : GradleCatalogUpgradeTarget
 }
 
-private fun localGradlePropertyRegex(propertyName: String): Regex {
-    return Regex(
-        """(?m)^(\s*(?:val\s+${Regex.escape(propertyName)}\s*=\s*|extra\[\s*["']${Regex.escape(propertyName)}["']\s*]\s*=\s*["']))([^"']+)(["'])""",
-    )
+private fun findGradlePropertyAssignmentRange(text: String, propertyName: String): TextRangeMarker? {
+    var lineStart = 0
+    while (lineStart < text.length) {
+        val lineEnd = text.indexOf('\n', lineStart).let { if (it < 0) text.length else it }
+        val line = text.substring(lineStart, lineEnd)
+        val trimmed = line.trim()
+        if (trimmed.isNotEmpty() && !trimmed.startsWith("#")) {
+            val eq = line.indexOf('=')
+            if (eq > 0) {
+                val name = line.substring(0, eq).trim()
+                if (name == propertyName) {
+                    val valueStartInLine = eq + 1 + line.substring(eq + 1).takeWhile { it.isWhitespace() }.length
+                    val commentIdx = line.indexOf('#', valueStartInLine).let { if (it < 0) line.length else it }
+                    val valueEndInLine = commentIdx
+                    return TextRangeMarker(lineStart + valueStartInLine, lineStart + valueEndInLine)
+                }
+            }
+        }
+        lineStart = lineEnd + 1
+    }
+    return null
+}
+
+private fun findKotlinPropertyAssignmentRange(text: String, propertyName: String): TextRangeMarker? {
+    var lineStart = 0
+    while (lineStart < text.length) {
+        val lineEnd = text.indexOf('\n', lineStart).let { if (it < 0) text.length else it }
+        val line = text.substring(lineStart, lineEnd)
+        val trimmed = line.trim()
+        val valPrefix = "val $propertyName"
+        if (trimmed.startsWith(valPrefix) && trimmed.contains('=')) {
+            val eq = line.indexOf('=')
+            val quote = line.indexOfAny(charArrayOf('"', '\''), eq + 1)
+            if (quote > eq) {
+                val end = line.indexOf(line[quote], quote + 1).takeIf { it > quote } ?: return null
+                return TextRangeMarker(lineStart + quote + 1, lineStart + end)
+            }
+        }
+        val extraPrefixDouble = "extra[\"$propertyName\"]"
+        val extraPrefixSingle = "extra['$propertyName']"
+        if ((trimmed.startsWith(extraPrefixDouble) || trimmed.startsWith(extraPrefixSingle)) && trimmed.contains('=')) {
+            val eq = line.indexOf('=')
+            val quote = line.indexOfAny(charArrayOf('"', '\''), eq + 1)
+            if (quote > eq) {
+                val end = line.indexOf(line[quote], quote + 1).takeIf { it > quote } ?: return null
+                return TextRangeMarker(lineStart + quote + 1, lineStart + end)
+            }
+        }
+        lineStart = lineEnd + 1
+    }
+    return null
+}
+
+private fun findTomlSimpleValueRange(text: String, key: String): TextRangeMarker? {
+    val lineRange = findTomlLineRange(text, key) ?: return null
+    val line = text.substring(lineRange.startOffset, lineRange.endOffset)
+    val eq = line.indexOf('=')
+    if (eq < 0) return null
+    val quote = line.indexOfAny(charArrayOf('"', '\''), eq + 1)
+    if (quote < 0) return null
+    val end = line.indexOf(line[quote], quote + 1).takeIf { it > quote } ?: return null
+    return TextRangeMarker(lineRange.startOffset + quote + 1, lineRange.startOffset + end)
+}
+
+private fun findTomlLineRange(text: String, key: String): TextRangeMarker? {
+    var lineStart = 0
+    while (lineStart < text.length) {
+        val lineEnd = text.indexOf('\n', lineStart).let { if (it < 0) text.length else it }
+        val line = text.substring(lineStart, lineEnd)
+        val eq = line.indexOf('=')
+        if (eq > 0 && line.substring(0, eq).trim() == key) {
+            return TextRangeMarker(lineStart, lineEnd)
+        }
+        lineStart = lineEnd + 1
+    }
+    return null
+}
+
+private fun findInlineTomlKeyValueRange(body: String, key: String): TextRangeMarker? {
+    val keyIdx = body.indexOf(key)
+    if (keyIdx < 0) return null
+    val eq = body.indexOf('=', keyIdx)
+    if (eq < 0) return null
+    val quote = body.indexOfAny(charArrayOf('"', '\''), eq + 1)
+    if (quote < 0) return null
+    val end = body.indexOf(body[quote], quote + 1).takeIf { it > quote } ?: return null
+    return TextRangeMarker(quote + 1, end)
 }

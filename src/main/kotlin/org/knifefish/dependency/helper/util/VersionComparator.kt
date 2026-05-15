@@ -40,10 +40,32 @@ object VersionComparator {
     fun newestStable(versions: List<String>): String? =
         versions.filter { isStable(it) }.maxWithOrNull(::compare)
 
-    private fun tokenize(version: String): List<String> =
-        version.split('.', '-', '_').flatMap { token ->
-            token.split(Regex("(?<=\\d)(?=\\D)|(?<=\\D)(?=\\d)"))
-        }.filter { it.isNotBlank() }
+    private fun tokenize(version: String): List<String> {
+        val tokens = mutableListOf<String>()
+        val current = StringBuilder()
+        var currentIsDigit: Boolean? = null
+        fun flush() {
+            if (current.isNotEmpty()) {
+                tokens += current.toString()
+                current.setLength(0)
+            }
+        }
+        version.forEach { ch ->
+            if (ch == '.' || ch == '-' || ch == '_') {
+                flush()
+                currentIsDigit = null
+                return@forEach
+            }
+            val isDigit = ch.isDigit()
+            if (currentIsDigit != null && currentIsDigit != isDigit) {
+                flush()
+            }
+            currentIsDigit = isDigit
+            current.append(ch)
+        }
+        flush()
+        return tokens
+    }
 
     private fun compareToken(left: String, right: String): Int {
         val leftNumber = left.toIntOrNull()

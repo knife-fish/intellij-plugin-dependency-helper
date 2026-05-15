@@ -1,0 +1,11 @@
+<idea-plugin>
+    <extensions defaultExtensionNs="org.knifefish.dependency.helper">
+        <ecosystemSupport implementation="org.knifefish.dependency.helper.services.ecosystem.RustDependencyEcosystemSupport"/>
+        <packageIndexSupport implementation="org.knifefish.dependency.helper.services.ecosystem.RustPackageIndexSupport"/>
+        <externalDependencySystem implementation="org.knifefish.dependency.helper.services.external.CargoExternalSystemAdapter"/>
+    </extensions>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <postStartupActivity implementation="org.knifefish.dependency.helper.startup.RustProjectActivity"/>
+    </extensions>
+</idea-plugin>

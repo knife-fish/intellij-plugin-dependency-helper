@@ -33,19 +33,17 @@ class ProjectRepositoryResolver(private val project: Project) {
             when (file.name) {
                 "pom.xml" -> addPomRepositories(file, repos[Ecosystem.MAVEN]!!)
                 "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts" ->
-                    addRegexRepositories(file, Ecosystem.GRADLE, repos[Ecosystem.GRADLE]!!, Regex("""url\s*[=]?\s*["'](https?://[^"']+)["']"""), file.path)
-                ".npmrc" -> addRegexRepositories(file, Ecosystem.NPM, repos[Ecosystem.NPM]!!, Regex("""(?m)^registry=(https?://.+)$"""), file.path)
-                "pyproject.toml" -> addRegexRepositories(file, Ecosystem.PYTHON, repos[Ecosystem.PYTHON]!!, Regex("""url\s*=\s*["'](https?://[^"']+)["']"""), file.path)
-                "Cargo.toml" -> addRegexRepositories(file, Ecosystem.RUST, repos[Ecosystem.RUST]!!, Regex("""index\s*=\s*["'](https?://[^"']+)["']"""), file.path)
+                    addGradleRepositories(file, repos[Ecosystem.GRADLE]!!)
+                ".npmrc" -> addNpmRepositories(file, repos[Ecosystem.NPM]!!)
+                "Cargo.toml" -> addTomlRepositories(file, repos[Ecosystem.RUST]!!, setOf("index"))
             }
         }
     }
 
     private fun collectUserRepositories(repos: MutableMap<Ecosystem, MutableList<RepositorySpec>>) {
         addMavenSettingsRepositories(repos[Ecosystem.MAVEN]!!, Path.of(System.getProperty("user.home"), ".m2", "settings.xml"))
-        addPathRegex(Ecosystem.NPM, repos[Ecosystem.NPM]!!, Path.of(System.getProperty("user.home"), ".npmrc"), Regex("""(?m)^registry=(https?://.+)$"""))
-        addPathRegex(Ecosystem.PYTHON, repos[Ecosystem.PYTHON]!!, Path.of(System.getProperty("user.home"), ".pip", "pip.conf"), Regex("""index-url\s*=\s*(https?://\S+)"""))
-        addPathRegex(Ecosystem.RUST, repos[Ecosystem.RUST]!!, Path.of(System.getProperty("user.home"), ".cargo", "config.toml"), Regex("""index\s*=\s*["'](https?://[^"']+)["']"""))
+        addNpmRepositories(Path.of(System.getProperty("user.home"), ".npmrc"), repos[Ecosystem.NPM]!!)
+        addTomlRepositories(Path.of(System.getProperty("user.home"), ".cargo", "config.toml"), repos[Ecosystem.RUST]!!, setOf("index"))
     }
 
     private fun addMavenSettingsRepositories(
@@ -69,31 +67,43 @@ class ProjectRepositoryResolver(private val project: Project) {
         }
     }
 
-    private fun addRegexRepositories(
-        file: VirtualFile,
-        ecosystem: Ecosystem,
-        target: MutableList<RepositorySpec>,
-        regex: Regex,
-        source: String,
-    ) {
+    private fun addGradleRepositories(file: VirtualFile, target: MutableList<RepositorySpec>) {
         val text = file.inputStream.bufferedReader().use { it.readText() }
-        regex.findAll(text).forEach { match ->
-            target += RepositorySpec(ecosystem, normalizeUrl(match.groupValues[1]), source, supportsSearch(match.groupValues[1], ecosystem))
+        extractGradleUrls(text).forEach { url ->
+            target += RepositorySpec(Ecosystem.GRADLE, normalizeUrl(url), file.path, supportsSearch(url, Ecosystem.GRADLE))
         }
     }
 
-    private fun addPathRegex(
-        ecosystem: Ecosystem,
-        target: MutableList<RepositorySpec>,
-        path: Path,
-        regex: Regex,
-    ) {
+    private fun addNpmRepositories(file: VirtualFile, target: MutableList<RepositorySpec>) {
+        val text = file.inputStream.bufferedReader().use { it.readText() }
+        extractNpmRegistries(text).forEach { url ->
+            target += RepositorySpec(Ecosystem.NPM, normalizeUrl(url), file.path, supportsSearch(url, Ecosystem.NPM))
+        }
+    }
+
+    private fun addNpmRepositories(path: Path, target: MutableList<RepositorySpec>) {
         if (!path.exists()) {
             return
         }
         val text = Files.readString(path)
-        regex.findAll(text).forEach { match ->
-            target += RepositorySpec(ecosystem, normalizeUrl(match.groupValues[1]), path.toString(), supportsSearch(match.groupValues[1], ecosystem))
+        extractNpmRegistries(text).forEach { url ->
+            target += RepositorySpec(Ecosystem.NPM, normalizeUrl(url), path.toString(), supportsSearch(url, Ecosystem.NPM))
+        }
+    }
+
+    private fun addTomlRepositories(file: VirtualFile, target: MutableList<RepositorySpec>, keys: Set<String>) {
+        val text = file.inputStream.bufferedReader().use { it.readText() }
+        extractTomlUrls(text, keys).forEach { url ->
+            val ecosystem = Ecosystem.RUST
+            target += RepositorySpec(ecosystem, normalizeUrl(url), file.path, supportsSearch(url, ecosystem))
+        }
+    }
+
+    private fun addTomlRepositories(path: Path, target: MutableList<RepositorySpec>, keys: Set<String>) {
+        if (!path.exists()) return
+        val text = Files.readString(path)
+        extractTomlUrls(text, keys).forEach { url ->
+            target += RepositorySpec(Ecosystem.RUST, normalizeUrl(url), path.toString(), supportsSearch(url, Ecosystem.RUST))
         }
     }
 
@@ -117,8 +127,6 @@ class ProjectRepositoryResolver(private val project: Project) {
             RepositorySpec(ecosystem, "https://repo1.maven.org/maven2/", "default", supportsSearch = ecosystem == Ecosystem.MAVEN)
         Ecosystem.NPM ->
             RepositorySpec(ecosystem, "https://registry.npmjs.org/", "default", supportsSearch = true)
-        Ecosystem.PYTHON ->
-            RepositorySpec(ecosystem, "https://pypi.org/", "default", supportsSearch = false)
         Ecosystem.RUST ->
             RepositorySpec(ecosystem, "https://crates.io/", "default", supportsSearch = true)
     }
@@ -131,11 +139,72 @@ class ProjectRepositoryResolver(private val project: Project) {
                 url.contains("nexus", ignoreCase = true) ||
                 url.contains("artifactory", ignoreCase = true)
         Ecosystem.NPM -> true
-        Ecosystem.PYTHON -> url.contains("pypi.org")
         Ecosystem.RUST -> url.contains("crates.io")
     }
 
     private fun normalizeUrl(url: String): String = if (url.endsWith("/")) url else "$url/"
+
+    private fun extractNpmRegistries(text: String): List<String> {
+        val result = mutableListOf<String>()
+        text.lineSequence().forEach { raw ->
+            val line = raw.substringBefore('#').trim()
+            val eq = line.indexOf('=')
+            if (eq <= 0) return@forEach
+            val key = line.substring(0, eq).trim()
+            if (key != "registry") return@forEach
+            val value = line.substring(eq + 1).trim().trim('"', '\'')
+            if (value.startsWith("http://") || value.startsWith("https://")) {
+                result += value
+            }
+        }
+        return result
+    }
+
+    private fun extractGradleUrls(text: String): List<String> {
+        val result = mutableListOf<String>()
+        text.lineSequence().forEach { line ->
+            if (!line.contains("url")) return@forEach
+            extractQuotedHttpValues(line).forEach(result::add)
+        }
+        return result
+    }
+
+    private fun extractQuotedHttpValues(text: String): List<String> {
+        val values = mutableListOf<String>()
+        var index = 0
+        while (index < text.length) {
+            val ch = text[index]
+            if (ch != '"' && ch != '\'') {
+                index++
+                continue
+            }
+            val quote = ch
+            var end = index + 1
+            while (end < text.length && text[end] != quote) {
+                end++
+            }
+            if (end >= text.length) break
+            val candidate = text.substring(index + 1, end).trim()
+            if (candidate.startsWith("http://") || candidate.startsWith("https://")) {
+                values += candidate
+            }
+            index = end + 1
+        }
+        return values
+    }
+
+    private fun extractTomlUrls(text: String, keys: Set<String>): List<String> {
+        val found = linkedSetOf<String>()
+        text.lineSequence().forEach { raw ->
+            val line = raw.substringBefore('#').trim()
+            val eq = line.indexOf('=')
+            if (eq <= 0) return@forEach
+            val key = line.substring(0, eq).trim().substringAfterLast('.')
+            if (key !in keys) return@forEach
+            extractQuotedHttpValues(line.substring(eq + 1)).forEach(found::add)
+        }
+        return found.toList()
+    }
 }
 
 internal object MavenSettingsRepositoryParser {

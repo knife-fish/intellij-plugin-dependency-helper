@@ -1,4 +1,9 @@
 <idea-plugin>
+    <extensions defaultExtensionNs="org.knifefish.dependency.helper">
+        <packageIndexSupport implementation="org.knifefish.dependency.helper.services.ecosystem.MavenPackageIndexSupport"/>
+        <externalDependencySystem implementation="org.knifefish.dependency.helper.services.external.MavenExternalSystemAdapter"/>
+    </extensions>
+
     <extensions defaultExtensionNs="com.intellij">
         <projectService serviceInterface="org.knifefish.dependency.helper.services.MavenSupport"
                         serviceImplementation="org.knifefish.dependency.helper.services.MavenDependencyAnalyzer"/>

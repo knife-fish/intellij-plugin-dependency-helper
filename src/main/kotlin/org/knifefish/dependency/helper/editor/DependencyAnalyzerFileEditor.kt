@@ -37,13 +37,19 @@ class DependencyAnalyzerFileEditor(
 
     override fun getName(): String = DependencyHelperBundle.message("Plugin.Name")
 
+    fun refreshDependencies() {
+        panel.refreshDependencies()
+    }
+
     override fun setState(state: FileEditorState) = Unit
 
     override fun isModified(): Boolean = false
 
     override fun isValid(): Boolean = file.isValid
 
-    override fun selectNotify() = Unit
+    override fun selectNotify() {
+        refreshDependencies()
+    }
 
     override fun deselectNotify() = Unit
 

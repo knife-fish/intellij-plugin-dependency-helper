@@ -18,14 +18,17 @@ import com.intellij.openapi.vfs.VirtualFile
 import org.jetbrains.annotations.VisibleForTesting
 import org.knifefish.dependency.helper.model.*
 import org.knifefish.dependency.helper.repository.ProjectRepositoryResolver
-import org.knifefish.dependency.helper.scanner.DependencyFileScanner
+import org.knifefish.dependency.helper.services.ecosystem.DependencyDeclarationRewriter
+import org.knifefish.dependency.helper.services.ecosystem.DependencyInsertion
+import org.knifefish.dependency.helper.services.ecosystem.DependencyInsertionPlanner
+import org.knifefish.dependency.helper.services.external.ExternalDependencySystems
 import java.util.concurrent.ConcurrentHashMap
 
 @Service(Service.Level.PROJECT)
 class DependencyInsightService(private val project: Project) {
 
-    private val scanner = DependencyFileScanner()
     private val indexClient = PackageIndexClient()
+    private val externalSystems = ExternalDependencySystems(project)
     private val cache = ConcurrentHashMap<String, CachedVersion>()
     @Volatile
     private var latestVersionPolicy: LatestVersionPolicy = LatestVersionPolicy.RELEASE_ONLY
@@ -39,8 +42,8 @@ class DependencyInsightService(private val project: Project) {
                 val excluded = file.path.contains("/build/") || file.path.contains("/.gradle/") || file.path.contains("/.git/")
                 !excluded
             }) { file ->
-                if (!file.isDirectory && scanner.supports(file)) {
-                    readText(file)?.let { text -> dependencies += scanner.scan(file, text) }
+                if (!file.isDirectory && externalSystems.supports(file)) {
+                    dependencies += scanFileInternal(file)
                 }
                 true
             }
@@ -50,28 +53,7 @@ class DependencyInsightService(private val project: Project) {
 
     fun scanFile(file: VirtualFile): List<DependencyCoordinate> =
         ReadAction.compute<List<DependencyCoordinate>, RuntimeException> {
-            readText(file)?.let { text ->
-                val scanned = scanner.scan(file, text)
-                when {
-                    file.name == "pom.xml" -> project.getService(MavenSupport::class.java)?.enrichDependencies(file, scanned) ?: scanned
-                    file.name in setOf("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts") -> {
-                        val gradleSupport = project.getService(GradleSupport::class.java)
-                        val enriched = gradleSupport?.enrichDependencies(file, scanned) ?: scanned
-                        thisLogger().info(
-                            buildString {
-                                append("DependencyHelper Gradle scanFile: file=${file.path}, gradleSupport=")
-                                append(gradleSupport?.javaClass?.simpleName ?: "null")
-                                append(", scanned=")
-                                append(scanned.joinToString { "${it.declaredVersion ?: it.displayName}=>${it.version.ifBlank { "unknown" }}" })
-                                append(", enriched=")
-                                append(enriched.joinToString { "${it.declaredVersion ?: it.displayName}=>${it.displayName}:${it.version.ifBlank { "unknown" }}" })
-                            },
-                        )
-                        enriched
-                    }
-                    else -> scanned
-                }
-            } ?: emptyList()
+            scanFileInternal(file)
         }
 
     fun repositoriesFor(ecosystem: Ecosystem): List<RepositorySpec> =
@@ -173,38 +155,24 @@ class DependencyInsightService(private val project: Project) {
             document.insertString(insertion.offset, insertion.text)
             FileDocumentManager.getInstance().saveDocument(document)
         })
-        when (result.ecosystem) {
-            Ecosystem.MAVEN -> project.getService(MavenSupport::class.java)?.refreshMavenProject(targetFile) {
+        if (!externalSystems.refresh(targetFile) {
                 refreshEditorsForFile(targetFile)
-            }
-            Ecosystem.GRADLE -> project.getService(GradleSupport::class.java)?.refreshGradleProject(targetFile) {
-                refreshEditorsForFile(targetFile)
-            } ?: refreshEditorsForFile(targetFile)
-            else -> refreshEditorsForFile(targetFile)
+            }) {
+            refreshEditorsForFile(targetFile)
         }
         return true
     }
 
     fun upgradeDependency(dependency: DependencyCoordinate, newVersion: String): Boolean {
         val document = FileDocumentManager.getInstance().getDocument(dependency.file) ?: return false
-        if (dependency.ecosystem == Ecosystem.MAVEN && dependency.usesManagedVersion) {
-            val upgraded = project.getService(MavenSupport::class.java)?.upgradeManagedDependency(dependency, newVersion)
-            if (upgraded != true) {
-                return false
-            }
-            project.getService(MavenSupport::class.java)?.refreshMavenProject(dependency.file) {
+        val upgradedByExternal = externalSystems.upgrade(dependency, newVersion)
+        if (upgradedByExternal) {
+            if (!externalSystems.refresh(dependency.file) {
+                    refreshEditorsForFile(dependency.file) { candidate -> sameArtifact(candidate, dependency) }
+                }) {
                 refreshEditorsForFile(dependency.file) { candidate -> sameArtifact(candidate, dependency) }
             }
             return true
-        }
-        if (dependency.ecosystem == Ecosystem.GRADLE) {
-            val upgraded = project.getService(GradleSupport::class.java)?.upgradeDependency(dependency, newVersion)
-            if (upgraded == true) {
-                project.getService(GradleSupport::class.java)?.refreshGradleProject(dependency.file) {
-                    refreshEditorsForFile(dependency.file) { candidate -> sameArtifact(candidate, dependency) }
-                } ?: refreshEditorsForFile(dependency.file) { candidate -> sameArtifact(candidate, dependency) }
-                return true
-            }
         }
         val replacement = resolveVersionReplacement(dependency, document.text, newVersion) ?: return false
         WriteCommandAction.runWriteCommandAction(project, Runnable {
@@ -214,15 +182,9 @@ class DependencyInsightService(private val project: Project) {
             document.replaceString(replacement.range.startOffset, replacement.range.endOffset, replacement.newDeclaration)
             FileDocumentManager.getInstance().saveDocument(document)
         })
-        if (dependency.ecosystem == Ecosystem.MAVEN) {
-            project.getService(MavenSupport::class.java)?.refreshMavenProject(dependency.file) {
+        if (!externalSystems.refresh(dependency.file) {
                 refreshEditorsForFile(dependency.file) { candidate -> sameArtifact(candidate, dependency) }
-            }
-        } else if (dependency.ecosystem == Ecosystem.GRADLE) {
-            project.getService(GradleSupport::class.java)?.refreshGradleProject(dependency.file) {
-                refreshEditorsForFile(dependency.file) { candidate -> sameArtifact(candidate, dependency) }
-            } ?: refreshEditorsForFile(dependency.file) { candidate -> sameArtifact(candidate, dependency) }
-        } else {
+            }) {
             refreshEditorsForFile(dependency.file) { candidate -> sameArtifact(candidate, dependency) }
         }
         return true
@@ -255,13 +217,7 @@ class DependencyInsightService(private val project: Project) {
         currentText: String,
         newVersion: String,
     ): DeclarationReplacement? {
-        val scanned = scanner.scan(dependency.file, currentText)
-        val currentDependencies = when (dependency.file.name) {
-            "pom.xml" -> project.getService(MavenSupport::class.java)?.enrichDependencies(dependency.file, scanned) ?: scanned
-            "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts" ->
-                project.getService(GradleSupport::class.java)?.enrichDependencies(dependency.file, scanned) ?: scanned
-            else -> scanned
-        }
+        val currentDependencies = scanFileInternal(dependency.file)
         val target = currentDependencies
             .filter { candidate ->
                 candidate.ecosystem == dependency.ecosystem &&
@@ -290,41 +246,16 @@ class DependencyInsightService(private val project: Project) {
         if (oldVersion.isBlank()) {
             return null
         }
-        return when (dependency.ecosystem) {
-            Ecosystem.MAVEN -> {
-                val pattern = Regex("(<version>\\s*)${Regex.escape(oldVersion)}(\\s*</version>)", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE))
-                if (!pattern.containsMatchIn(declaration)) null else declaration.replaceFirst(pattern, "$1$newVersion$2")
-            }
-            Ecosystem.GRADLE -> {
-                val pattern = Regex("(:)${Regex.escape(oldVersion)}([\"'])")
-                if (!pattern.containsMatchIn(declaration)) null else declaration.replaceFirst(pattern, "$1$newVersion$2")
-            }
-            Ecosystem.NPM -> {
-                val replacementVersion = npmUpgradedVersionValue(oldVersion, newVersion) ?: return null
-                val pattern = Regex("(\"${Regex.escape(dependency.name)}\"\\s*:\\s*\")${Regex.escape(oldVersion)}(\")")
-                if (!pattern.containsMatchIn(declaration)) null else declaration.replaceFirst(pattern, "$1$replacementVersion$2")
-            }
-            Ecosystem.PYTHON -> {
-                val namePattern = Regex.escape(dependency.name)
-                val pattern = Regex("($namePattern\\s*(?:==|>=|<=|~=|!=|>|<)\\s*)${Regex.escape(oldVersion)}")
-                if (pattern.containsMatchIn(declaration)) {
-                    declaration.replaceFirst(pattern, "$1$newVersion")
-                } else {
-                    val poetryPattern = Regex("(${Regex.escape(dependency.name)}\\s*=\\s*[\"'])${Regex.escape(oldVersion)}([\"'])")
-                    if (!poetryPattern.containsMatchIn(declaration)) null else declaration.replaceFirst(poetryPattern, "$1$newVersion$2")
-                }
-            }
-            Ecosystem.RUST -> {
-                val inlinePattern = Regex("(${Regex.escape(dependency.name)}\\s*=\\s*\")${Regex.escape(oldVersion)}(\")")
-                when {
-                    inlinePattern.containsMatchIn(declaration) -> declaration.replaceFirst(inlinePattern, "$1$newVersion$2")
-                    else -> {
-                        val tablePattern = Regex("(version\\s*=\\s*\")${Regex.escape(oldVersion)}(\")")
-                        if (!tablePattern.containsMatchIn(declaration)) null else declaration.replaceFirst(tablePattern, "$1$newVersion$2")
-                    }
-                }
-            }
-        }
+        return DependencyDeclarationRewriter.replaceVersionInDeclaration(
+            dependency = dependency,
+            declaration = declaration,
+            newVersion = newVersion,
+        )
+    }
+
+    private fun scanFileInternal(file: VirtualFile): List<DependencyCoordinate> {
+        val scanned = externalSystems.scan(file)
+        return externalSystems.enrich(file, scanned)
     }
 
     private data class DeclarationReplacement(
@@ -338,69 +269,7 @@ class DependencyInsightService(private val project: Project) {
         result: PackageSearchResult,
         version: String,
         text: String,
-    ): DependencyInsertion? {
-        return when (fileName) {
-            "pom.xml" -> {
-                val anchor = Regex("</dependencies>", RegexOption.IGNORE_CASE).find(text)?.range?.first ?: return null
-                DependencyInsertion(
-                    anchor,
-                    """
-                    
-                        <dependency>
-                            <groupId>${result.group.orEmpty()}</groupId>
-                            <artifactId>${result.name}</artifactId>
-                            <version>$version</version>
-                        </dependency>
-                    """.trimIndent(),
-                )
-            }
-            "build.gradle", "build.gradle.kts" -> {
-                val anchor = Regex("""(?m)^\s*dependencies\s*\{""").find(text)?.range?.last?.plus(1) ?: return null
-                val notation = if (result.group.isNullOrBlank()) result.name else "${result.group}:${result.name}"
-                DependencyInsertion(anchor, "\n    implementation(\"$notation:$version\")")
-            }
-            "package.json" -> {
-                val dependenciesMatch = Regex(""""dependencies"\s*:\s*\{""").find(text)
-                if (dependenciesMatch != null) {
-                    val insertOffset = dependenciesMatch.range.last + 1
-                    DependencyInsertion(insertOffset, "\n    \"${result.name}\": \"$version\",")
-                } else {
-                    val rootOpen = text.indexOf('{')
-                    val rootClose = text.lastIndexOf('}')
-                    if (rootOpen < 0) return null
-                    val hasOtherFields = rootClose > rootOpen + 1 && text.substring(rootOpen + 1, rootClose).trim().isNotEmpty()
-                    val suffix = if (hasOtherFields) "," else ""
-                    val insertText = "\n  \"dependencies\": {\n    \"${result.name}\": \"$version\"\n  }$suffix"
-                    DependencyInsertion(rootOpen + 1, insertText)
-                }
-            }
-            "requirements.txt" -> DependencyInsertion(text.length, if (text.endsWith("\n") || text.isEmpty()) "${result.name}==$version\n" else "\n${result.name}==$version\n")
-            "pyproject.toml" -> {
-                val anchor = Regex("""(?m)^\s*dependencies\s*=\s*\[""").find(text)?.range?.last?.plus(1)
-                if (anchor != null) {
-                    DependencyInsertion(anchor, "\n    \"${result.name}==$version\",")
-                } else {
-                    val hasProject = Regex("""(?m)^\[project]""").containsMatchIn(text)
-                    val prefix = if (text.endsWith("\n") || text.isEmpty()) "" else "\n"
-                    if (hasProject) {
-                        DependencyInsertion(text.length, "${prefix}dependencies = [\n    \"${result.name}==$version\",\n]\n")
-                    } else {
-                        DependencyInsertion(text.length, "${prefix}[project]\ndependencies = [\n    \"${result.name}==$version\",\n]\n")
-                    }
-                }
-            }
-            "Cargo.toml" -> {
-                val anchor = Regex("""(?ms)^\[dependencies]\s*""").find(text)?.range?.last?.plus(1)
-                if (anchor != null) {
-                    DependencyInsertion(anchor, "\n${result.name} = \"$version\"")
-                } else {
-                    val prefix = if (text.endsWith("\n") || text.isEmpty()) "" else "\n"
-                    DependencyInsertion(text.length, "${prefix}[dependencies]\n${result.name} = \"$version\"\n")
-                }
-            }
-            else -> null
-        }
-    }
+    ): DependencyInsertion? = DependencyInsertionPlanner.buildDependencyInsertion(fileName, result, version, text)
 
     private data class CachedVersion(
         val info: VersionInfo,
@@ -409,43 +278,12 @@ class DependencyInsightService(private val project: Project) {
         fun isExpired(): Boolean = System.currentTimeMillis() - timestamp > 10 * 60 * 1000
     }
 
-    internal data class DependencyInsertion(
-        val offset: Int,
-        val text: String,
-    )
 }
 
 fun Project.dependencyInsightService(): DependencyInsightService = service()
 
-internal fun npmUpgradedVersionValue(oldVersion: String, newVersion: String): String? {
-    val value = oldVersion.trim()
-    if (value.isBlank()) {
-        return null
-    }
-    val unsupportedPrefixes = listOf("workspace:", "file:", "link:", "git+", "github:", "gitlab:", "bitbucket:", "http://", "https://", "npm:")
-    if (unsupportedPrefixes.any { prefix -> value.startsWith(prefix, ignoreCase = true) }) {
-        return null
-    }
-    val simpleRange = Regex("""^([\^~])\s*([^\s]+)$""").matchEntire(value)
-    if (simpleRange != null) {
-        return "${simpleRange.groupValues[1]}$newVersion"
-    }
-    return if (value.contains(" ") || value.contains("||")) {
-        null
-    } else {
-        newVersion
-    }
-}
+internal fun npmUpgradedVersionValue(oldVersion: String, newVersion: String): String? =
+    org.knifefish.dependency.helper.services.ecosystem.npmUpgradedVersionValue(oldVersion, newVersion)
 
-internal fun hasRecommendedUpgrade(dependency: DependencyCoordinate, latestStable: String?): Boolean {
-    val latest = latestStable?.trim()?.takeIf { it.isNotEmpty() } ?: return false
-    val current = dependency.version.trim()
-    if (current == latest) {
-        return false
-    }
-    if (dependency.ecosystem != Ecosystem.NPM) {
-        return true
-    }
-    val normalizedCurrent = current.removePrefix("^").removePrefix("~").trim()
-    return normalizedCurrent != latest
-}
+internal fun hasRecommendedUpgrade(dependency: DependencyCoordinate, latestStable: String?): Boolean =
+    org.knifefish.dependency.helper.services.ecosystem.hasRecommendedUpgrade(dependency, latestStable)

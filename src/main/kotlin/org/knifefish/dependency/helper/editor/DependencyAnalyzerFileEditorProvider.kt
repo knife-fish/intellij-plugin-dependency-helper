@@ -6,13 +6,12 @@ import com.intellij.openapi.fileEditor.FileEditorProvider
 import com.intellij.openapi.fileEditor.FileEditorState
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
-import org.knifefish.dependency.helper.scanner.DependencyFileScanner
+import org.knifefish.dependency.helper.services.external.ExternalDependencySystems
 
 class DependencyAnalyzerFileEditorProvider : FileEditorProvider {
 
-    private val scanner = DependencyFileScanner()
-
-    override fun accept(project: Project, file: VirtualFile): Boolean = scanner.supports(file)
+    override fun accept(project: Project, file: VirtualFile): Boolean =
+        ExternalDependencySystems(project).supports(file)
 
     override fun createEditor(project: Project, file: VirtualFile): FileEditor =
         DependencyAnalyzerFileEditor(project, file)

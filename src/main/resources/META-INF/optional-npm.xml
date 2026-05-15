@@ -1,0 +1,7 @@
+<idea-plugin>
+    <extensions defaultExtensionNs="org.knifefish.dependency.helper">
+        <ecosystemSupport implementation="org.knifefish.dependency.helper.services.ecosystem.NpmDependencyEcosystemSupport"/>
+        <packageIndexSupport implementation="org.knifefish.dependency.helper.services.ecosystem.NpmPackageIndexSupport"/>
+        <externalDependencySystem implementation="org.knifefish.dependency.helper.services.external.NpmExternalSystemAdapter"/>
+    </extensions>
+</idea-plugin>
