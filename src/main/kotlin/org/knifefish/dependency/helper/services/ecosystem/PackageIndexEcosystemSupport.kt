@@ -2,7 +2,6 @@ package org.knifefish.dependency.helper.services.ecosystem
 
 import com.intellij.openapi.extensions.ExtensionPointName
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonElement
 import org.knifefish.dependency.helper.model.*
 
 interface PackageIndexEcosystemSupport {
@@ -33,13 +32,10 @@ interface PackageIndexEcosystemSupport {
     }
 }
 
-data class PackageIndexContext(
-    val json: Json,
-    val descendingVersionComparator: Comparator<String>,
+class PackageIndexContext(
     val get: (String) -> String,
+    val json: Json,
     val mapFailure: (String, Throwable) -> VersionInfo,
-    val defaultRepository: (Ecosystem) -> RepositorySpec,
-    val encode: (String) -> String,
-    val encodeNpmPackage: (String) -> String,
-    val content: (JsonElement?) -> String?,
-)
+) {
+    inline fun <reified T> getJson(url: String): T = json.decodeFromString(get(url))
+}

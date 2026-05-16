@@ -1,36 +1,203 @@
 package org.knifefish.dependency.helper.services
 
+import com.intellij.openapi.application.ApplicationInfo
 import com.intellij.openapi.diagnostic.thisLogger
+import com.intellij.util.io.HttpRequests
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.jsonPrimitive
 import org.knifefish.dependency.helper.model.*
 import org.knifefish.dependency.helper.services.ecosystem.*
-import org.knifefish.dependency.helper.util.VersionComparator
-import java.net.URI
-import java.net.URLEncoder
-import java.net.http.HttpClient
-import java.net.http.HttpRequest
-import java.net.http.HttpResponse
-import java.nio.charset.StandardCharsets
-import java.time.Duration
+import java.io.IOException
+import kotlin.math.min
 
 class PackageIndexClient {
 
-    private val httpClient = HttpClient.newBuilder()
-        .followRedirects(HttpClient.Redirect.NORMAL)
-        .connectTimeout(Duration.ofSeconds(10))
-        .build()
-
     private val json = Json { ignoreUnknownKeys = true }
-    private val descendingVersionComparator = Comparator<String> { left, right -> VersionComparator.compare(left, right) }.reversed()
+
+    private open class RepositoryHttpException(
+        val url: String,
+        val statusCode: Int,
+        responseMessage: String?,
+    ) : IllegalStateException("HTTP $statusCode for $url${responseMessage?.let { ": $it" }.orEmpty()}")
+
+    private class UnauthorizedException(url: String, responseMessage: String?) :
+        RepositoryHttpException(url, 401, responseMessage)
+
+    private class RateLimitedException(url: String, responseMessage: String?) :
+        RepositoryHttpException(url, 429, responseMessage)
+
+    private class NotFoundException(url: String, responseMessage: String?) :
+        RepositoryHttpException(url, 404, responseMessage)
+
+    @Serializable
+    private data class RepositoryErrorResponse(
+        val message: String? = null,
+        val error: String? = null,
+    ) {
+        fun messageText(): String? = message ?: error
+    }
+
+    private fun HttpRequests.HttpStatusException.toRepositoryException(): RepositoryHttpException {
+        val responseMessage = parseErrorMessage(message)
+        return when (statusCode) {
+            401, 403 ->
+                UnauthorizedException(url, responseMessage)
+
+            429 ->
+                RateLimitedException(url, responseMessage)
+
+            404 ->
+                NotFoundException(url, responseMessage)
+
+            else ->
+                RepositoryHttpException(url, statusCode, responseMessage)
+        }
+    }
+
+    private fun parseErrorMessage(response: String?): String? {
+        if (response.isNullOrBlank()) return response
+        return runCatching { json.decodeFromString<RepositoryErrorResponse>(response).messageText() }
+            .getOrNull()
+            ?: response
+    }
+
+    private fun get(url: String): String {
+        return executeWithRetry(url) {
+            request(url).readString()
+        }
+    }
+
+    private fun <T> executeWithRetry(url: String, request: () -> T): T {
+        var attempt = 0
+        var lastError: Throwable? = null
+        while (attempt <= MAX_RETRIES) {
+            try {
+                return request()
+            } catch (error: HttpRequests.HttpStatusException) {
+                if (!error.isRetryableStatus() || attempt == MAX_RETRIES) {
+                    throw error.toRepositoryException()
+                }
+                lastError = error
+            } catch (error: IOException) {
+                if (attempt == MAX_RETRIES) {
+                    throw error
+                }
+                lastError = error
+            }
+            Thread.sleep(retryDelayMillis(attempt))
+            attempt++
+        }
+        throw lastError ?: IllegalStateException("Package lookup failed for $url")
+    }
+
+    private fun request(url: String) = HttpRequests.request(url)
+        .connectTimeout(CONNECT_TIMEOUT_MILLIS)
+        .readTimeout(READ_TIMEOUT_MILLIS)
+        .accept("application/json")
+        .productNameAsUserAgent()
+        .isReadResponseOnError(true)
+        .tuner { connection ->
+            connection.setRequestProperty("JB-IDE-Version", ApplicationInfo.getInstance().strictVersion)
+        }
+
+    private fun HttpRequests.HttpStatusException.isRetryableStatus(): Boolean {
+        return statusCode == REQUEST_TIMEOUT_STATUS || statusCode in SERVER_ERROR_STATUS_RANGE
+    }
+
+    private fun retryDelayMillis(attempt: Int): Long {
+        return min(1_000L shl attempt, 4_000L)
+    }
+
+    private fun mapFailure(repositoryUrl: String, error: Throwable): VersionInfo = when (error) {
+        is UnauthorizedException -> VersionInfo(
+            latestStable = null,
+            latestAvailable = null,
+            repositoryUrl = repositoryUrl,
+            publishedAt = null,
+            status = LookupStatus.UNAUTHORIZED,
+            message = "Authentication required",
+        )
+
+        is RateLimitedException -> VersionInfo(
+            latestStable = null,
+            latestAvailable = null,
+            repositoryUrl = repositoryUrl,
+            publishedAt = null,
+            status = LookupStatus.RATE_LIMITED,
+            message = "Repository rate limit",
+        )
+
+        is NotFoundException -> VersionInfo(
+            latestStable = null,
+            latestAvailable = null,
+            repositoryUrl = repositoryUrl,
+            publishedAt = null,
+            status = LookupStatus.NOT_FOUND,
+            message = "Package not found",
+        )
+
+        is RepositoryHttpException -> {
+            thisLogger().warn("Package lookup failed for $repositoryUrl: HTTP ${error.statusCode}", error)
+            VersionInfo(
+                latestStable = null,
+                latestAvailable = null,
+                repositoryUrl = repositoryUrl,
+                publishedAt = null,
+                status = LookupStatus.ERROR,
+                message = error.message,
+            )
+        }
+
+        is SerializationException -> {
+            thisLogger().warn("Package lookup returned invalid JSON for $repositoryUrl", error)
+            VersionInfo(
+                latestStable = null,
+                latestAvailable = null,
+                repositoryUrl = repositoryUrl,
+                publishedAt = null,
+                status = LookupStatus.ERROR,
+                message = "Invalid repository response",
+            )
+        }
+
+        else -> {
+            thisLogger().warn("Package lookup failed for $repositoryUrl", error)
+            VersionInfo(
+                latestStable = null,
+                latestAvailable = null,
+                repositoryUrl = repositoryUrl,
+                publishedAt = null,
+                status = LookupStatus.ERROR,
+                message = error.message,
+            )
+        }
+    }
+
+    private fun ecosystemSupport(ecosystem: Ecosystem): PackageIndexEcosystemSupport? {
+        val extensions = runCatching { PackageIndexEcosystemSupport.EP_NAME.extensionList }.getOrDefault(emptyList())
+        return extensions.firstOrNull { it.ecosystem == ecosystem }
+            ?: when (ecosystem) {
+                Ecosystem.MAVEN -> MavenPackageIndexSupport()
+                Ecosystem.GRADLE -> GradlePackageIndexSupport()
+                Ecosystem.NPM -> NpmPackageIndexSupport()
+                Ecosystem.RUST -> RustPackageIndexSupport()
+            }
+    }
+
+    private fun supportContext(): PackageIndexContext = PackageIndexContext(
+        get = ::get,
+        json = json,
+        mapFailure = ::mapFailure,
+    )
 
     fun findLatestVersion(
         dependency: DependencyCoordinate,
         repositories: List<RepositorySpec>,
         policy: LatestVersionPolicy,
     ): VersionInfo {
-        val support = ecosystemSupport(dependency.ecosystem) ?: return VersionInfo(null, null, null, null, LookupStatus.NOT_FOUND)
+        val support =
+            ecosystemSupport(dependency.ecosystem) ?: return VersionInfo(null, null, null, null, LookupStatus.NOT_FOUND)
         val info = support.findLatestVersion(dependency, repositories, supportContext())
         return applyPolicy(info, policy)
     }
@@ -58,88 +225,11 @@ class PackageIndexClient {
         return info.copy(latestStable = preferred, latestAvailable = info.latestAvailable ?: info.latestStable)
     }
 
-    private fun get(url: String): String {
-        val request = HttpRequest.newBuilder(URI.create(url))
-            .timeout(Duration.ofSeconds(15))
-            .header("Accept", "application/json, text/plain, */*")
-            .GET()
-            .build()
-        val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
-        return when (response.statusCode()) {
-            in 200..299 -> response.body()
-            401, 403 -> throw UnauthorizedException(url)
-            429 -> throw RateLimitedException(url)
-            else -> throw IllegalStateException("HTTP ${response.statusCode()} for $url")
-        }
+    private companion object {
+        private const val CONNECT_TIMEOUT_MILLIS = 3_000
+        private const val READ_TIMEOUT_MILLIS = 3_000
+        private const val MAX_RETRIES = 3
+        private const val REQUEST_TIMEOUT_STATUS = 408
+        private val SERVER_ERROR_STATUS_RANGE = 500..599
     }
-
-    private fun mapFailure(repositoryUrl: String, error: Throwable): VersionInfo = when (error) {
-        is UnauthorizedException -> VersionInfo(
-            latestStable = null,
-            latestAvailable = null,
-            repositoryUrl = repositoryUrl,
-            publishedAt = null,
-            status = LookupStatus.UNAUTHORIZED,
-            message = "Authentication required",
-        )
-
-        is RateLimitedException -> VersionInfo(
-            latestStable = null,
-            latestAvailable = null,
-            repositoryUrl = repositoryUrl,
-            publishedAt = null,
-            status = LookupStatus.RATE_LIMITED,
-            message = "Repository rate limit",
-        )
-
-        else -> {
-            thisLogger().warn("Package lookup failed for $repositoryUrl", error)
-            VersionInfo(
-                latestStable = null,
-                latestAvailable = null,
-                repositoryUrl = repositoryUrl,
-                publishedAt = null,
-                status = LookupStatus.ERROR,
-                message = error.message,
-            )
-        }
-    }
-
-    private fun encode(value: String): String = URLEncoder.encode(value, StandardCharsets.UTF_8)
-
-    private fun encodeNpmPackage(value: String): String =
-        value.split("/").joinToString("/") { encode(it) }
-
-    private fun content(element: JsonElement?): String? = runCatching { element?.jsonPrimitive?.content }.getOrNull()
-
-    private fun defaultRepository(ecosystem: Ecosystem): RepositorySpec = when (ecosystem) {
-        Ecosystem.MAVEN, Ecosystem.GRADLE -> RepositorySpec(ecosystem, "https://repo1.maven.org/maven2/", "default", true)
-        Ecosystem.NPM -> RepositorySpec(ecosystem, "https://registry.npmjs.org/", "default", true)
-        Ecosystem.RUST -> RepositorySpec(ecosystem, "https://crates.io/", "default", true)
-    }
-
-    private class UnauthorizedException(url: String) : IllegalStateException(url)
-    private class RateLimitedException(url: String) : IllegalStateException(url)
-
-    private fun ecosystemSupport(ecosystem: Ecosystem): PackageIndexEcosystemSupport? {
-        val extensions = runCatching { PackageIndexEcosystemSupport.EP_NAME.extensionList }.getOrDefault(emptyList())
-        return extensions.firstOrNull { it.ecosystem == ecosystem }
-            ?: when (ecosystem) {
-                Ecosystem.MAVEN -> MavenPackageIndexSupport()
-                Ecosystem.GRADLE -> GradlePackageIndexSupport()
-                Ecosystem.NPM -> NpmPackageIndexSupport()
-                Ecosystem.RUST -> RustPackageIndexSupport()
-            }
-    }
-
-    private fun supportContext(): PackageIndexContext = PackageIndexContext(
-        json = json,
-        descendingVersionComparator = descendingVersionComparator,
-        get = ::get,
-        mapFailure = ::mapFailure,
-        defaultRepository = ::defaultRepository,
-        encode = ::encode,
-        encodeNpmPackage = ::encodeNpmPackage,
-        content = ::content,
-    )
 }

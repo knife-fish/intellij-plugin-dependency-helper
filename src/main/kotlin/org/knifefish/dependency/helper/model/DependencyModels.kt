@@ -3,14 +3,21 @@ package org.knifefish.dependency.helper.model
 import com.intellij.openapi.vfs.VirtualFile
 import org.knifefish.dependency.helper.DependencyHelperBundle
 
-enum class Ecosystem(private val bundleKey: String) {
-    MAVEN("Ecosystem.Maven"),
-    GRADLE("Ecosystem.Gradle"),
-    NPM("Ecosystem.Npm"),
-    RUST("Ecosystem.Rust");
+enum class Ecosystem(
+    private val bundleKey: String,
+    private val defaultRepositoryUrl: String,
+    private val defaultRepositorySupportsSearch: Boolean,
+) {
+    MAVEN("Ecosystem.Maven", "https://repo1.maven.org/maven2/", true),
+    GRADLE("Ecosystem.Gradle", "https://repo1.maven.org/maven2/", true),
+    NPM("Ecosystem.Npm", "https://registry.npmjs.org/", true),
+    RUST("Ecosystem.Rust", "https://crates.io/", true);
 
     val displayName: String
         get() = DependencyHelperBundle.message(bundleKey)
+
+    val defaultRepository: RepositorySpec
+        get() = RepositorySpec(this, defaultRepositoryUrl, "default", defaultRepositorySupportsSearch)
 
     companion object {
         fun fromDisplayName(name: String): Ecosystem? = entries.firstOrNull { it.displayName == name }

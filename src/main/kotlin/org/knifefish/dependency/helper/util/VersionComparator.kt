@@ -3,6 +3,7 @@ package org.knifefish.dependency.helper.util
 object VersionComparator {
 
     private val prereleaseMarkers = listOf("alpha", "beta", "rc", "m", "milestone", "snapshot", "preview", "dev")
+    val DESCENDING: Comparator<String> = Comparator<String> { left, right -> compare(left, right) }.reversed()
 
     fun isStable(version: String): Boolean {
         val lower = version.lowercase()

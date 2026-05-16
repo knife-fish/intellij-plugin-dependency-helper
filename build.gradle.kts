@@ -2,6 +2,7 @@ import org.jetbrains.intellij.platform.gradle.TestFrameworkType
 
 plugins {
     id("org.jetbrains.kotlin.jvm")
+    kotlin("plugin.serialization")
     id("org.jetbrains.intellij.platform")
     id("org.jetbrains.changelog")
 }
@@ -20,4 +21,8 @@ dependencies {
         plugin("com.jetbrains.rust:252.23892.452")
         testFramework(TestFrameworkType.Platform)
     }
+}
+
+configurations.configureEach {
+    exclude(group = "org.jetbrains.kotlinx", module = "kotlinx-coroutines-core")
 }

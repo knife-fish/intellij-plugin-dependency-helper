@@ -14,6 +14,8 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.project.guessProjectDir
 import com.intellij.openapi.vfs.VfsUtilCore
 import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.psi.PsiDocumentManager
+import com.intellij.psi.codeStyle.CodeStyleManager
 import org.jetbrains.annotations.VisibleForTesting
 import org.knifefish.dependency.helper.model.*
 import org.knifefish.dependency.helper.repository.ProjectRepositoryResolver
@@ -116,13 +118,15 @@ class DependencyInsightService(private val project: Project) {
         forceRefresh: ((DependencyCoordinate) -> Boolean)?,
     ) {
         val file = FileDocumentManager.getInstance().getFile(editor.document) ?: return
-        val dependencies = scanFile(file)
-        if (dependencies.isEmpty()) {
-            DependencyInlayManager.clear(editor)
-            return
-        }
-        val repositories = ProjectRepositoryResolver(project).resolveForProject()
         ApplicationManager.getApplication().executeOnPooledThread {
+            val dependencies = scanFile(file)
+            if (dependencies.isEmpty()) {
+                ApplicationManager.getApplication().invokeLater {
+                    DependencyInlayManager.clear(editor)
+                }
+                return@executeOnPooledThread
+            }
+            val repositories = ProjectRepositoryResolver(project).resolveForProject()
             val latestRule = latestVersionPolicy().displayName
             val lookups = dependencies.map { dependency ->
                 val info = lookupLatestVersion(
@@ -152,16 +156,32 @@ class DependencyInsightService(private val project: Project) {
     fun addDependency(targetFile: VirtualFile, result: PackageSearchResult, version: String): Boolean {
         val document = FileDocumentManager.getInstance().getDocument(targetFile) ?: return false
         val insertion = buildDependencyInsertion(targetFile.name, result, version, document.text) ?: return false
-        WriteCommandAction.runWriteCommandAction(project, Runnable {
+        WriteCommandAction.runWriteCommandAction(project) {
             document.insertString(insertion.offset, insertion.text)
+            reformatInsertedDependency(targetFile, insertion.offset, insertion.offset + insertion.text.length)
             FileDocumentManager.getInstance().saveDocument(document)
-        })
+        }
         if (!externalSystems.refresh(targetFile) {
                 refreshEditorsForFile(targetFile)
             }) {
             refreshEditorsForFile(targetFile)
         }
         return true
+    }
+
+    private fun reformatInsertedDependency(targetFile: VirtualFile, startOffset: Int, endOffset: Int) {
+        if (targetFile.name != "pom.xml") {
+            return
+        }
+        val psiDocumentManager = PsiDocumentManager.getInstance(project)
+        val document = FileDocumentManager.getInstance().getDocument(targetFile) ?: return
+        psiDocumentManager.commitDocument(document)
+        val psiFile = psiDocumentManager.getPsiFile(document) ?: return
+        val safeEndOffset = endOffset.coerceAtMost(document.textLength)
+        if (startOffset >= safeEndOffset) {
+            return
+        }
+        CodeStyleManager.getInstance(project).reformatText(psiFile, startOffset, safeEndOffset)
     }
 
     fun upgradeDependency(dependency: DependencyCoordinate, newVersion: String): Boolean {

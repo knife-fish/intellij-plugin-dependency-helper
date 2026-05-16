@@ -5,6 +5,7 @@ import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.diagnostic.thisLogger
+import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.ComboBox
@@ -36,6 +37,7 @@ import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.nio.file.Files
 import java.nio.file.Paths
+import java.util.concurrent.atomic.AtomicInteger
 import javax.swing.*
 import javax.swing.tree.DefaultMutableTreeNode
 import javax.swing.tree.DefaultTreeCellRenderer
@@ -70,6 +72,7 @@ class DependencyAnalyzerPanel(
     private val searchRows = mutableListOf<PackageSearchRow>()
     private val searchResultsPanel = JPanel()
     private val searchDebounceTimer = Timer(1000) { runSearch() }.apply { isRepeats = false }
+    private val searchGeneration = AtomicInteger()
 
     private var roots: List<MavenDependencyNodeView> = emptyList()
     private var latestVersionByKey: Map<String, String> = emptyMap()
@@ -167,7 +170,7 @@ class DependencyAnalyzerPanel(
 
         val firstRow = JPanel(BorderLayout()).apply {
             add(JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
-                add(JButton(message("Button.Refresh")).apply { addActionListener { reloadDependencies() } })
+                add(JButton(message("Button.Refresh")).apply { addActionListener { reloadDependencies(refreshExternalModel = true) } })
                 add(treeModeButton)
                 add(listModeButton)
                 add(JBLabel(message("Label.Filter")))
@@ -252,15 +255,25 @@ class DependencyAnalyzerPanel(
         }
     }
 
-    private fun reloadDependencies() {
+    private fun reloadDependencies(refreshExternalModel: Boolean = false) {
         val targetFile = currentFile ?: activeDependencyFile()
         val effectiveTargetFile = resolveGradleDisplayFile(targetFile)
+        if (refreshExternalModel) {
+            saveDocument(effectiveTargetFile)
+        }
         thisLogger().info(
             "DependencyHelper reloadDependencies: currentFile=${currentFile?.path}, targetFile=${targetFile?.path}, " +
                 "effectiveTargetFile=${effectiveTargetFile?.path}, " +
                 "mavenSupport=${mavenSupport?.javaClass?.simpleName ?: "null"}, " +
                 "gradleSupport=${gradleSupport?.javaClass?.simpleName ?: "null"}",
         )
+        if (refreshExternalModel && effectiveTargetFile?.name == "pom.xml" && mavenSupport != null) {
+            thisLogger().info("DependencyHelper reloadDependencies branch: mavenRefresh file=${effectiveTargetFile.path}")
+            mavenSupport.refreshMavenProject(effectiveTargetFile) {
+                reloadDependencies(refreshExternalModel = false)
+            }
+            return
+        }
         if (effectiveTargetFile != null && effectiveTargetFile.name in setOf("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts")) {
             thisLogger().info("DependencyHelper reloadDependencies branch: gradleAnalyze-async file=${effectiveTargetFile.path}")
             ApplicationManager.getApplication().executeOnPooledThread {
@@ -276,35 +289,47 @@ class DependencyAnalyzerPanel(
             }
             return
         }
-        roots = when {
-            effectiveTargetFile?.name == "pom.xml" && mavenSupport != null -> {
-                val pomTarget = requireNotNull(effectiveTargetFile)
-                thisLogger().info("DependencyHelper reloadDependencies branch: mavenAnalyze file=${pomTarget.path}")
-                val analyzedRoots = mavenSupport.analyze()
-                analyzedRoots.filter { it.ownerProjectFile.path == pomTarget.path }
-                    .ifEmpty { buildFileRoots(pomTarget) }
-            }
-            effectiveTargetFile?.name == "Cargo.toml" -> {
-                val cargoRoots = buildFileRoots(effectiveTargetFile)
-                if (cargoRoots.isEmpty()) {
-                    externalSystems.refresh(effectiveTargetFile) {
-                        ApplicationManager.getApplication().invokeLater {
-                            applyRoots(buildFileRoots(effectiveTargetFile))
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val resolvedRoots = when {
+                effectiveTargetFile?.name == "pom.xml" && mavenSupport != null -> {
+                    val pomTarget = requireNotNull(effectiveTargetFile)
+                    thisLogger().info("DependencyHelper reloadDependencies branch: mavenAnalyze file=${pomTarget.path}")
+                    val analyzedRoots = mavenSupport.analyze()
+                    analyzedRoots.filter { it.ownerProjectFile.path == pomTarget.path }
+                        .ifEmpty { buildFileRoots(pomTarget) }
+                }
+                effectiveTargetFile?.name == "Cargo.toml" -> {
+                    val cargoRoots = buildFileRoots(effectiveTargetFile)
+                    if (cargoRoots.isEmpty()) {
+                        externalSystems.refresh(effectiveTargetFile) {
+                            ApplicationManager.getApplication().executeOnPooledThread {
+                                val refreshedRoots = buildFileRoots(effectiveTargetFile)
+                                ApplicationManager.getApplication().invokeLater {
+                                    applyRoots(refreshedRoots)
+                                }
+                            }
                         }
                     }
+                    cargoRoots
                 }
-                cargoRoots
+                effectiveTargetFile != null -> {
+                    thisLogger().info("DependencyHelper reloadDependencies branch: fileRoots file=${effectiveTargetFile.path}")
+                    buildFileRoots(effectiveTargetFile)
+                }
+                else -> {
+                    thisLogger().info("DependencyHelper reloadDependencies branch: projectMavenAnalyze")
+                    mavenSupport?.analyze().orEmpty()
+                }
             }
-            effectiveTargetFile != null -> {
-                thisLogger().info("DependencyHelper reloadDependencies branch: fileRoots file=${effectiveTargetFile.path}")
-                buildFileRoots(effectiveTargetFile)
-            }
-            else -> {
-                thisLogger().info("DependencyHelper reloadDependencies branch: projectMavenAnalyze")
-                mavenSupport?.analyze().orEmpty()
+            ApplicationManager.getApplication().invokeLater {
+                applyRoots(resolvedRoots)
             }
         }
-        applyRoots(roots)
+    }
+
+    private fun saveDocument(file: com.intellij.openapi.vfs.VirtualFile?) {
+        val document = file?.let { FileDocumentManager.getInstance().getDocument(it) } ?: return
+        FileDocumentManager.getInstance().saveDocument(document)
     }
 
     private fun activeDependencyFile(): com.intellij.openapi.vfs.VirtualFile? {
@@ -564,6 +589,7 @@ class DependencyAnalyzerPanel(
 
     private fun runSearch() {
         val query = searchField.text.trim()
+        val generation = searchGeneration.incrementAndGet()
         if (query.length < 2) {
             searchRows.clear()
             renderSearchResults()
@@ -576,29 +602,46 @@ class DependencyAnalyzerPanel(
             return
         }
         searchRows.clear()
-        searchRows += service.searchPackages(ecosystem, query).map { result ->
-            PackageSearchRow(
-                result = result,
-                selectedVersion = result.latestVersion.orEmpty(),
-                versions = mutableListOf(result.latestVersion.orEmpty()).apply { removeAll { it.isBlank() } },
-            )
-        }
-        renderSearchResults()
-        if (searchRows.isEmpty()) {
-            renderSearchResults(message("Panel.Search.NoResults"))
-            return
-        }
+        renderSearchResults(message("Panel.Search.Loading"))
         ApplicationManager.getApplication().executeOnPooledThread {
-            searchRows.forEachIndexed { index, row ->
-                val versions = service.availableVersions(row.result.ecosystem, row.result.group, row.result.name)
+            val results = service.searchPackages(ecosystem, query)
+            ApplicationManager.getApplication().invokeLater {
+                if (generation != searchGeneration.get()) {
+                    return@invokeLater
+                }
+                searchRows.clear()
+                searchRows += results.map { result ->
+                    PackageSearchRow(
+                        result = result,
+                        selectedVersion = result.latestVersion.orEmpty(),
+                        versions = mutableListOf(result.latestVersion.orEmpty()).apply { removeAll { it.isBlank() } },
+                    )
+                }
+                renderSearchResults()
+                if (searchRows.isEmpty()) {
+                    renderSearchResults(message("Panel.Search.NoResults"))
+                } else {
+                    loadSearchResultVersions(generation, results)
+                }
+            }
+        }
+    }
+
+    private fun loadSearchResultVersions(generation: Int, results: List<PackageSearchResult>) {
+        ApplicationManager.getApplication().executeOnPooledThread {
+            results.forEachIndexed { index, result ->
+                val versions = service.availableVersions(result.ecosystem, result.group, result.name)
                 if (versions.isEmpty()) {
                     return@forEachIndexed
                 }
                 ApplicationManager.getApplication().invokeLater {
-                    if (index >= searchRows.size) {
+                    if (generation != searchGeneration.get() || index >= searchRows.size) {
                         return@invokeLater
                     }
                     val target = searchRows[index]
+                    if (target.result != result) {
+                        return@invokeLater
+                    }
                     target.versions.clear()
                     target.versions += versions
                     if (target.selectedVersion.isBlank() || target.selectedVersion !in target.versions) {

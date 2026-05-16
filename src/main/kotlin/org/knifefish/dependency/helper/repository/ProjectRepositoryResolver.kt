@@ -23,7 +23,7 @@ class ProjectRepositoryResolver(private val project: Project) {
             }
             collectUserRepositories(byEcosystem)
             byEcosystem.mapValues { (ecosystem, repos) ->
-                repos.distinctBy { it.url }.ifEmpty { listOf(defaultRepository(ecosystem)) }
+                repos.distinctBy { it.url }.ifEmpty { listOf(ecosystem.defaultRepository) }
             }
         }
     }
@@ -120,15 +120,6 @@ class ProjectRepositoryResolver(private val project: Project) {
                 yield(file)
             }
         }
-    }
-
-    private fun defaultRepository(ecosystem: Ecosystem): RepositorySpec = when (ecosystem) {
-        Ecosystem.MAVEN, Ecosystem.GRADLE ->
-            RepositorySpec(ecosystem, "https://repo1.maven.org/maven2/", "default", supportsSearch = ecosystem == Ecosystem.MAVEN)
-        Ecosystem.NPM ->
-            RepositorySpec(ecosystem, "https://registry.npmjs.org/", "default", supportsSearch = true)
-        Ecosystem.RUST ->
-            RepositorySpec(ecosystem, "https://crates.io/", "default", supportsSearch = true)
     }
 
     private fun supportsSearch(url: String, ecosystem: Ecosystem): Boolean = when (ecosystem) {

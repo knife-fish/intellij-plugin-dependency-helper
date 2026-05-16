@@ -38,7 +38,8 @@ internal object DependencyInsertionPlanner {
                     <artifactId>${result.name}</artifactId>
                     <version>$version</version>
                 </dependency>
-            """.trimIndent(),
+
+                """,
         )
     }
 

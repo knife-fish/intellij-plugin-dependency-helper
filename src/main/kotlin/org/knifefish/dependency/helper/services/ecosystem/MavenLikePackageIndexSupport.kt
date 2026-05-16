@@ -1,13 +1,14 @@
 package org.knifefish.dependency.helper.services.ecosystem
 
 import com.intellij.openapi.diagnostic.thisLogger
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
 import org.knifefish.dependency.helper.model.*
 import org.knifefish.dependency.helper.services.MavenRepositorySearchBackend
 import org.knifefish.dependency.helper.util.VersionComparator
 import java.net.URI
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
 import java.time.LocalDateTime
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
@@ -25,7 +26,7 @@ abstract class AbstractMavenLikePackageIndexSupport(
         repositories: List<RepositorySpec>,
         context: PackageIndexContext,
     ): VersionInfo {
-        val ordered = repositories.ifEmpty { listOf(context.defaultRepository(ecosystem)) }
+        val ordered = repositories.ifEmpty { listOf(ecosystem.defaultRepository) }
         var unauthorized: VersionInfo? = null
         ordered.forEach { repository ->
             val result = fetchLatestMavenVersion(repository, dependency, context)
@@ -40,7 +41,7 @@ abstract class AbstractMavenLikePackageIndexSupport(
         repositories: List<RepositorySpec>,
         context: PackageIndexContext,
     ): List<PackageSearchResult> {
-        val candidates = repositories.ifEmpty { listOf(context.defaultRepository(ecosystem)) }.distinctBy { it.url }
+        val candidates = repositories.ifEmpty { listOf(ecosystem.defaultRepository) }.distinctBy { it.url }
         candidates.forEach { repository ->
             val results = when (val backend = MavenRepositorySearchBackend.from(repository.url)) {
                 MavenRepositorySearchBackend.CENTRAL -> searchMavenCentral(query, context)
@@ -60,7 +61,7 @@ abstract class AbstractMavenLikePackageIndexSupport(
         context: PackageIndexContext,
     ): List<String> {
         if (group.isNullOrBlank()) return emptyList()
-        val ordered = repositories.ifEmpty { listOf(context.defaultRepository(ecosystem)) }
+        val ordered = repositories.ifEmpty { listOf(ecosystem.defaultRepository) }
         ordered.forEach { repository ->
             val versions = runCatching {
                 val metadataUrl = "${repository.url}${group.replace('.', '/')}/$name/maven-metadata.xml"
@@ -68,7 +69,7 @@ abstract class AbstractMavenLikePackageIndexSupport(
                 parseMavenMetadata(body).versions
                     .asSequence()
                     .distinct()
-                    .sortedWith(context.descendingVersionComparator)
+                    .sortedWith(VersionComparator.DESCENDING)
                     .take(30)
                     .toList()
             }.getOrElse {
@@ -106,15 +107,12 @@ abstract class AbstractMavenLikePackageIndexSupport(
     }
 
     private fun searchMavenCentral(query: String, context: PackageIndexContext): List<PackageSearchResult> {
-        val url = "https://search.maven.org/solrsearch/select?q=${context.encode(query)}&rows=20&wt=json"
+        val url = "https://search.maven.org/solrsearch/select?q=${URLEncoder.encode(query, StandardCharsets.UTF_8)}&rows=20&wt=json"
         return runCatching {
-            val response = context.get(url)
-            val docs = context.json.parseToJsonElement(response).jsonObject["response"]?.jsonObject?.get("docs")?.jsonArray.orEmpty()
-            docs.mapNotNull { item ->
-                val obj = item.jsonObject
-                val group = context.content(obj["g"]) ?: return@mapNotNull null
-                val artifact = context.content(obj["a"]) ?: return@mapNotNull null
-                PackageSearchResult(ecosystem, group, artifact, context.content(obj["latestVersion"]), null, "https://search.maven.org/")
+            context.getJson<MavenCentralSearchResponse>(url).response.docs.mapNotNull { item ->
+                val group = item.group ?: return@mapNotNull null
+                val artifact = item.artifact ?: return@mapNotNull null
+                PackageSearchResult(ecosystem, group, artifact, item.latestVersion, null, "https://search.maven.org/")
             }
         }.getOrElse {
             thisLogger().warn("Maven search failed", it)
@@ -142,23 +140,22 @@ abstract class AbstractMavenLikePackageIndexSupport(
         backend: MavenRepositorySearchBackend.NEXUS,
         context: PackageIndexContext,
     ): List<PackageSearchResult> {
-        val params = mutableListOf("repository=${context.encode(backend.repositoryKey)}", "format=maven2")
+        val params = mutableListOf("repository=${URLEncoder.encode(backend.repositoryKey, StandardCharsets.UTF_8)}", "format=maven2")
         val gav = gavParts(query)
         if (gav != null) {
-            params += "group=${context.encode(gav.first)}"
-            params += "name=${context.encode(gav.second)}"
+            params += "group=${URLEncoder.encode(gav.first, StandardCharsets.UTF_8)}"
+            params += "name=${URLEncoder.encode(gav.second, StandardCharsets.UTF_8)}"
         } else {
-            params += "name=${context.encode(query)}"
+            params += "name=${URLEncoder.encode(query, StandardCharsets.UTF_8)}"
         }
         val url = "${backend.baseUrl}/service/rest/v1/search?${params.joinToString("&")}"
         return runCatching {
-            val response = context.get(url)
-            val items = context.json.parseToJsonElement(response).jsonObject["items"]?.jsonArray.orEmpty()
+            val response = context.getJson<NexusSearchResponse>(url)
             aggregateMavenSearchResults(
-                items = items.map { it.jsonObject },
-                groupSelector = { context.content(it["group"]) },
-                artifactSelector = { context.content(it["name"]) },
-                versionSelector = { context.content(it["version"]) },
+                items = response.items,
+                groupSelector = NexusSearchItem::group,
+                artifactSelector = NexusSearchItem::name,
+                versionSelector = NexusSearchItem::version,
                 description = "Nexus search",
                 repositoryUrl = repository.url,
             )
@@ -189,19 +186,18 @@ abstract class AbstractMavenLikePackageIndexSupport(
         val url = buildString {
             append(backend.baseUrl)
             append("/api/search/gavc?g=")
-            append(context.encode(groupId))
+            append(URLEncoder.encode(groupId, StandardCharsets.UTF_8))
             append("&a=")
-            append(context.encode(artifactId))
+            append(URLEncoder.encode(artifactId, StandardCharsets.UTF_8))
             append("&specific=true")
             backend.repositoryKey?.let {
                 append("&repos=")
-                append(context.encode(it))
+                append(URLEncoder.encode(it, StandardCharsets.UTF_8))
             }
         }
         return runCatching {
-            val response = context.get(url)
-            val items = parseArtifactoryItems(response, context)
-            val latest = items.mapNotNull { context.content(it["version"]) }.maxWithOrNull(VersionComparator::compare)
+            val items = parseArtifactoryItems(context.get(url), context)
+            val latest = items.mapNotNull { it.version }.maxWithOrNull(VersionComparator::compare)
             if (latest == null) emptyList() else listOf(PackageSearchResult(ecosystem, groupId, artifactId, latest, "Artifactory GAVC search", repository.url))
         }.getOrElse {
             thisLogger().warn("Artifactory GAVC search failed for ${repository.url}", it)
@@ -218,20 +214,19 @@ abstract class AbstractMavenLikePackageIndexSupport(
         val url = buildString {
             append(backend.baseUrl)
             append("/api/search/gavc?a=")
-            append(context.encode(query))
+            append(URLEncoder.encode(query, StandardCharsets.UTF_8))
             append("&specific=true")
             backend.repositoryKey?.let {
                 append("&repos=")
-                append(context.encode(it))
+                append(URLEncoder.encode(it, StandardCharsets.UTF_8))
             }
         }
         return runCatching {
-            val response = context.get(url)
-            val items = parseArtifactoryItems(response, context)
+            val items = parseArtifactoryItems(context.get(url), context)
             val grouped = items.mapNotNull { item ->
-                val downloadUrl = context.content(item["downloadUri"]) ?: context.content(item["downloadUrl"]) ?: return@mapNotNull null
+                val downloadUrl = item.downloadUri ?: item.downloadUrl ?: return@mapNotNull null
                 val coordinates = parseArtifactoryDownloadUrl(downloadUrl) ?: return@mapNotNull null
-                coordinates to context.content(item["version"])
+                coordinates to item.version
             }.groupBy({ it.first }, { it.second })
             grouped.map { (coordinates, versions) ->
                 PackageSearchResult(
@@ -249,11 +244,11 @@ abstract class AbstractMavenLikePackageIndexSupport(
         }
     }
 
-    private fun aggregateMavenSearchResults(
-        items: List<JsonObject>,
-        groupSelector: (JsonObject) -> String?,
-        artifactSelector: (JsonObject) -> String?,
-        versionSelector: (JsonObject) -> String?,
+    private fun <T> aggregateMavenSearchResults(
+        items: List<T>,
+        groupSelector: (T) -> String?,
+        artifactSelector: (T) -> String?,
+        versionSelector: (T) -> String?,
         description: String,
         repositoryUrl: String,
     ): List<PackageSearchResult> {
@@ -277,12 +272,9 @@ abstract class AbstractMavenLikePackageIndexSupport(
             .sortedBy { it.displayName }
     }
 
-    private fun parseArtifactoryItems(response: String, context: PackageIndexContext): List<JsonObject> {
-        val element = context.json.parseToJsonElement(response)
-        return when {
-            runCatching { element.jsonArray }.isSuccess -> element.jsonArray.map { it.jsonObject }
-            else -> element.jsonObject["results"]?.jsonArray?.map { it.jsonObject }.orEmpty()
-        }
+    private fun parseArtifactoryItems(body: String, context: PackageIndexContext): List<ArtifactorySearchItem> {
+        return runCatching { context.json.decodeFromString<List<ArtifactorySearchItem>>(body) }
+            .getOrElse { context.json.decodeFromString<ArtifactorySearchResponse>(body).results }
     }
 
     private fun parseArtifactoryDownloadUrl(downloadUrl: String): Pair<String, String>? {
@@ -318,6 +310,49 @@ private data class MavenMetadata(
     val release: String?,
     val versions: List<String>,
     val lastUpdated: String?,
+)
+
+@Serializable
+private data class MavenCentralSearchResponse(
+    val response: MavenCentralResponse = MavenCentralResponse(),
+)
+
+@Serializable
+private data class MavenCentralResponse(
+    val docs: List<MavenCentralDocument> = emptyList(),
+)
+
+@Serializable
+private data class MavenCentralDocument(
+    @SerialName("g")
+    val group: String? = null,
+    @SerialName("a")
+    val artifact: String? = null,
+    val latestVersion: String? = null,
+)
+
+@Serializable
+private data class NexusSearchResponse(
+    val items: List<NexusSearchItem> = emptyList(),
+)
+
+@Serializable
+private data class NexusSearchItem(
+    val group: String? = null,
+    val name: String? = null,
+    val version: String? = null,
+)
+
+@Serializable
+private data class ArtifactorySearchResponse(
+    val results: List<ArtifactorySearchItem> = emptyList(),
+)
+
+@Serializable
+private data class ArtifactorySearchItem(
+    val version: String? = null,
+    val downloadUri: String? = null,
+    val downloadUrl: String? = null,
 )
 
 private fun parseMavenMetadata(xml: String): MavenMetadata {
