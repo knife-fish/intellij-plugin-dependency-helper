@@ -11,7 +11,7 @@
     <depends>com.intellij.modules.platform</depends>
     <depends optional="true" config-file="optional-maven.xml">org.jetbrains.idea.maven</depends>
     <depends optional="true" config-file="optional-gradle.xml">com.intellij.gradle</depends>
-    <depends optional="true" config-file="optional-npm.xml">com.intellij.modules.javascript</depends>
+    <depends optional="true" config-file="optional-npm.xml">JavaScript</depends>
 
     <resource-bundle>messages.DependencyHelperBundle</resource-bundle>
 
