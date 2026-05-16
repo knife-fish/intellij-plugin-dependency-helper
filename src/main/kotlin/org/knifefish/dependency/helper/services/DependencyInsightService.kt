@@ -41,7 +41,10 @@ class DependencyInsightService(private val project: Project) {
             val dependencies = mutableListOf<DependencyCoordinate>()
             val baseDir = project.guessProjectDir() ?: return@readAction DependencySnapshot(emptyList(), repositories)
             VfsUtilCore.iterateChildrenRecursively(baseDir, { file ->
-                val excluded = file.path.contains("/build/") || file.path.contains("/.gradle/") || file.path.contains("/.git/")
+                val excluded = file.path.contains("/build/") ||
+                    file.path.contains("/.gradle/") ||
+                    file.path.contains("/.git/") ||
+                    file.path.contains("/node_modules/")
                 !excluded
             }) { file ->
                 if (!file.isDirectory && externalSystems.supports(file)) {

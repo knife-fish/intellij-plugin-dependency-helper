@@ -4,7 +4,7 @@
     <name>Dependency Helper</name>
     <vendor>Knifefish</vendor>
     <description><![CDATA[
-        <p><b>Dependency Helper</b> support Maven, Gradle, and Npm dependency analysis and package search.</p>
+        <p><b>Dependency Helper</b> support Maven and Gradle dependency analysis and package search, Npm package.json version hints.</p>
         <p>It highlights newer releases inline, supports package search, and offers a dependency dashboard with basic conflict and exclusion guidance.</p>
     ]]></description>
 

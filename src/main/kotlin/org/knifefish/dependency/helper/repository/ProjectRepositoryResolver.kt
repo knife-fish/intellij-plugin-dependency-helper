@@ -96,7 +96,7 @@ class ProjectRepositoryResolver(private val project: Project) {
             val file = stack.removeLast()
             if (file.isDirectory) {
                 file.children
-                    .filterNot { it.name.startsWith(".idea") || it.name == "build" || it.name == ".gradle" || it.name == ".git" }
+                    .filterNot { it.name.startsWith(".idea") || it.name == "build" || it.name == ".gradle" || it.name == ".git" || it.name == "node_modules" }
                     .forEach { stack += it }
             } else {
                 yield(file)

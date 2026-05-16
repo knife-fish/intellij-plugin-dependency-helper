@@ -209,8 +209,8 @@ class DependencyAnalyzerPanel(
             }, BorderLayout.EAST)
         }
 
-        val currentEcosystem = currentDependencyTargetFile()?.let { externalSystems.ecosystemFor(it) }
-        if (currentEcosystem !in setOf(Ecosystem.MAVEN, Ecosystem.GRADLE)) {
+        val ecosystem = currentEcosystem()
+        if (ecosystem !in setOf(Ecosystem.MAVEN, Ecosystem.GRADLE)) {
             return JPanel(BorderLayout()).apply {
                 add(firstRow, BorderLayout.NORTH)
             }
@@ -581,7 +581,7 @@ class DependencyAnalyzerPanel(
             renderSearchResults()
             return
         }
-        val ecosystem = currentSearchEcosystem()
+        val ecosystem = currentEcosystem()
         if (ecosystem == null) {
             searchRows.clear()
             renderSearchResults(message("Panel.Search.OpenDependencyFile"))
@@ -651,22 +651,14 @@ class DependencyAnalyzerPanel(
     }
 
     private fun currentDependencyTargetFile(): com.intellij.openapi.vfs.VirtualFile? {
-        return currentFile ?: com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project)
+        return currentFile ?: FileEditorManager.getInstance(project)
             .selectedFiles
             .firstOrNull { file ->
-                file.name in setOf("pom.xml", "build.gradle", "build.gradle.kts", "package.json")
+                file.name in setOf("pom.xml", "build.gradle", "build.gradle.kts")
             }
     }
 
-    private fun currentSearchEcosystem(): Ecosystem? {
-        val file = currentDependencyTargetFile() ?: return null
-        return when (file.name) {
-            "pom.xml" -> Ecosystem.MAVEN
-            "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts" -> Ecosystem.GRADLE
-            "package.json" -> Ecosystem.NPM
-            else -> null
-        }
-    }
+    private fun currentEcosystem(): Ecosystem? = currentDependencyTargetFile()?.let { externalSystems.ecosystemFor(it) }
 
     private fun addSearchResult(rowIndex: Int) {
         val row = searchRows.getOrNull(rowIndex) ?: return

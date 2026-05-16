@@ -19,7 +19,7 @@ internal class GradleExternalSystemAdapter : ExternalDependencySystem {
             file.name == "settings.gradle" ||
             file.name == "settings.gradle.kts"
 
-    override fun supportsAnalyzer(file: VirtualFile): Boolean = supports(file)
+    override fun supportsAnalyzer(file: VirtualFile): Boolean = supports(file) && ecosystem.supportsAnalyzer
 
     /** 调用 GradleSupport 解析依赖树，并提取源依赖。 */
     override fun scan(project: Project, file: VirtualFile): List<DependencyCoordinate> {

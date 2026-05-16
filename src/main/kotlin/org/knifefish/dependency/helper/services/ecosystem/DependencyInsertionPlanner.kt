@@ -14,9 +14,7 @@ internal object DependencyInsertionPlanner {
         return when (result.ecosystem) {
             Ecosystem.MAVEN -> buildMavenInsertion(fileName, result, version, text)
             Ecosystem.GRADLE -> buildGradleInsertion(fileName, result, version, text)
-            Ecosystem.NPM ->
-                ecosystemSupport(result.ecosystem)
-                    ?.buildDependencyInsertion(fileName, result, version, text)
+            Ecosystem.NPM -> null
         }
     }
 
@@ -69,15 +67,6 @@ internal object DependencyInsertionPlanner {
             idx = text.indexOf(key, after)
         }
         return null
-    }
-
-    private fun ecosystemSupport(ecosystem: Ecosystem): DependencyEcosystemSupport? {
-        val extensions = runCatching { DependencyEcosystemSupport.EP_NAME.extensionList }.getOrDefault(emptyList())
-        return extensions.firstOrNull { it.ecosystem == ecosystem }
-            ?: when (ecosystem) {
-                Ecosystem.NPM -> NpmDependencyEcosystemSupport()
-                else -> null
-            }
     }
 }
 

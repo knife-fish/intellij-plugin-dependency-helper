@@ -17,14 +17,14 @@ interface PackageIndexEcosystemSupport {
         query: String,
         repositories: List<RepositorySpec>,
         context: PackageIndexContext,
-    ): List<PackageSearchResult>
+    ): List<PackageSearchResult> = emptyList()
 
     fun availableVersions(
         group: String?,
         name: String,
         repositories: List<RepositorySpec>,
         context: PackageIndexContext,
-    ): List<String>
+    ): List<String> = emptyList()
 
     companion object {
         val EP_NAME: ExtensionPointName<PackageIndexEcosystemSupport> =

@@ -2,7 +2,6 @@ package org.knifefish.dependency.helper.services.ecosystem
 
 import org.knifefish.dependency.helper.model.DependencyCoordinate
 import org.knifefish.dependency.helper.model.Ecosystem
-import org.knifefish.dependency.helper.model.PackageSearchResult
 
 class NpmDependencyEcosystemSupport : DependencyEcosystemSupport {
     override val ecosystem: Ecosystem = Ecosystem.NPM
@@ -49,26 +48,4 @@ class NpmDependencyEcosystemSupport : DependencyEcosystemSupport {
         return declaration.replaceRange(valueStart, valueEnd, replacementVersion)
     }
 
-    override fun buildDependencyInsertion(
-        fileName: String,
-        result: PackageSearchResult,
-        version: String,
-        text: String,
-    ): DependencyInsertion? {
-        if (fileName != "package.json") return null
-        val keyToken = "\"dependencies\""
-        val keyIndex = text.indexOf(keyToken)
-        if (keyIndex >= 0) {
-            val objectStart = text.indexOf('{', keyIndex + keyToken.length)
-            if (objectStart < 0) return null
-            return DependencyInsertion(objectStart + 1, "\n    \"${result.name}\": \"$version\",")
-        }
-        val rootOpen = text.indexOf('{')
-        val rootClose = text.lastIndexOf('}')
-        if (rootOpen < 0) return null
-        val hasOtherFields = rootClose > rootOpen + 1 && text.substring(rootOpen + 1, rootClose).trim().isNotEmpty()
-        val suffix = if (hasOtherFields) "," else ""
-        val insertText = "\n  \"dependencies\": {\n    \"${result.name}\": \"$version\"\n  }$suffix"
-        return DependencyInsertion(rootOpen + 1, insertText)
-    }
 }

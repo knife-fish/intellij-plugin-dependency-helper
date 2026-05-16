@@ -5,12 +5,14 @@ import org.knifefish.dependency.helper.DependencyHelperBundle
 
 enum class Ecosystem(
     private val bundleKey: String,
+    // open fileEditorAnalyzer panel if true
+    val supportsAnalyzer: Boolean,
     private val defaultRepositoryUrl: String,
     private val defaultRepositorySupportsSearch: Boolean,
 ) {
-    MAVEN("Ecosystem.Maven", "https://repo1.maven.org/maven2/", true),
-    GRADLE("Ecosystem.Gradle", "https://repo1.maven.org/maven2/", true),
-    NPM("Ecosystem.Npm", "https://registry.npmjs.org/", true);
+    MAVEN("Ecosystem.Maven", true, "https://repo1.maven.org/maven2/", true),
+    GRADLE("Ecosystem.Gradle", true, "https://repo1.maven.org/maven2/", true),
+    NPM("Ecosystem.Npm", false, "https://registry.npmjs.org/", true);
 
     val displayName: String
         get() = DependencyHelperBundle.message(bundleKey)
