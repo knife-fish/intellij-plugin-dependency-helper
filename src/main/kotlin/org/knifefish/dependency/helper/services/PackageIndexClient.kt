@@ -181,7 +181,6 @@ class PackageIndexClient {
                 Ecosystem.MAVEN -> MavenPackageIndexSupport()
                 Ecosystem.GRADLE -> GradlePackageIndexSupport()
                 Ecosystem.NPM -> NpmPackageIndexSupport()
-                Ecosystem.RUST -> RustPackageIndexSupport()
             }
     }
 

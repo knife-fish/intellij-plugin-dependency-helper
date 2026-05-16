@@ -298,20 +298,6 @@ class DependencyAnalyzerPanel(
                     analyzedRoots.filter { it.ownerProjectFile.path == pomTarget.path }
                         .ifEmpty { buildFileRoots(pomTarget) }
                 }
-                effectiveTargetFile?.name == "Cargo.toml" -> {
-                    val cargoRoots = buildFileRoots(effectiveTargetFile)
-                    if (cargoRoots.isEmpty()) {
-                        externalSystems.refresh(effectiveTargetFile) {
-                            ApplicationManager.getApplication().executeOnPooledThread {
-                                val refreshedRoots = buildFileRoots(effectiveTargetFile)
-                                ApplicationManager.getApplication().invokeLater {
-                                    applyRoots(refreshedRoots)
-                                }
-                            }
-                        }
-                    }
-                    cargoRoots
-                }
                 effectiveTargetFile != null -> {
                     thisLogger().info("DependencyHelper reloadDependencies branch: fileRoots file=${effectiveTargetFile.path}")
                     buildFileRoots(effectiveTargetFile)
@@ -668,7 +654,7 @@ class DependencyAnalyzerPanel(
         return currentFile ?: com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project)
             .selectedFiles
             .firstOrNull { file ->
-                file.name in setOf("pom.xml", "build.gradle", "build.gradle.kts", "package.json", "Cargo.toml")
+                file.name in setOf("pom.xml", "build.gradle", "build.gradle.kts", "package.json")
             }
     }
 
@@ -678,7 +664,6 @@ class DependencyAnalyzerPanel(
             "pom.xml" -> Ecosystem.MAVEN
             "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts" -> Ecosystem.GRADLE
             "package.json" -> Ecosystem.NPM
-            "Cargo.toml" -> Ecosystem.RUST
             else -> null
         }
     }

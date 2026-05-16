@@ -4,7 +4,7 @@
     <name>Dependency Helper</name>
     <vendor>Knifefish</vendor>
     <description><![CDATA[
-        <p><b>Dependency Helper</b> support Maven, Gradle, Npm, and Cargo dependency analysis and package search.</p>
+        <p><b>Dependency Helper</b> support Maven, Gradle, and Npm dependency analysis and package search.</p>
         <p>It highlights newer releases inline, supports package search, and offers a dependency dashboard with basic conflict and exclusion guidance.</p>
     ]]></description>
 
@@ -12,7 +12,6 @@
     <depends optional="true" config-file="optional-maven.xml">org.jetbrains.idea.maven</depends>
     <depends optional="true" config-file="optional-gradle.xml">com.intellij.gradle</depends>
     <depends optional="true" config-file="optional-npm.xml">com.intellij.modules.javascript</depends>
-    <depends optional="true" config-file="optional-rust.xml">com.jetbrains.rust</depends>
 
     <resource-bundle>messages.DependencyHelperBundle</resource-bundle>
 

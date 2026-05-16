@@ -8,7 +8,7 @@ import org.knifefish.dependency.helper.model.Ecosystem
 
 /**
  * 外部生态系统适配接口。
- * 由不同生态（Maven/Gradle/NPM/Rust）实现，统一提供扫描、刷新、升级等能力。
+ * 由不同生态（Maven/Gradle/NPM）实现，统一提供扫描、刷新、升级等能力。
  */
 internal interface ExternalDependencySystem {
     /** 当前适配器对应的生态类型。 */
@@ -16,6 +16,8 @@ internal interface ExternalDependencySystem {
 
     /** 判断当前文件是否由该适配器处理。 */
     fun supports(file: VirtualFile): Boolean = false
+
+    fun supportsAnalyzer(file: VirtualFile): Boolean = false
 
     /** 扫描文件并返回依赖坐标。 */
     fun scan(project: Project, file: VirtualFile): List<DependencyCoordinate> = emptyList()

@@ -12,6 +12,8 @@ internal class MavenExternalSystemAdapter : ExternalDependencySystem {
 
     override fun supports(file: VirtualFile): Boolean = file.name == "pom.xml"
 
+    override fun supportsAnalyzer(file: VirtualFile): Boolean = supports(file)
+
     override fun scan(project: Project, file: VirtualFile): List<DependencyCoordinate> {
         val support = project.getService(MavenSupport::class.java) ?: return emptyList()
         val out = mutableListOf<DependencyCoordinate>()

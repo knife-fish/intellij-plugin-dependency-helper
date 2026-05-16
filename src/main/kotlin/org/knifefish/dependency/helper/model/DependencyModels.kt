@@ -10,8 +10,7 @@ enum class Ecosystem(
 ) {
     MAVEN("Ecosystem.Maven", "https://repo1.maven.org/maven2/", true),
     GRADLE("Ecosystem.Gradle", "https://repo1.maven.org/maven2/", true),
-    NPM("Ecosystem.Npm", "https://registry.npmjs.org/", true),
-    RUST("Ecosystem.Rust", "https://crates.io/", true);
+    NPM("Ecosystem.Npm", "https://registry.npmjs.org/", true);
 
     val displayName: String
         get() = DependencyHelperBundle.message(bundleKey)

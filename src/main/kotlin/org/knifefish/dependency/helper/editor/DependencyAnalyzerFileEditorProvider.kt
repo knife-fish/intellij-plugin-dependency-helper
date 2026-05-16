@@ -11,7 +11,7 @@ import org.knifefish.dependency.helper.services.external.ExternalDependencySyste
 class DependencyAnalyzerFileEditorProvider : FileEditorProvider {
 
     override fun accept(project: Project, file: VirtualFile): Boolean =
-        ExternalDependencySystems(project).supports(file)
+        ExternalDependencySystems(project).supportsAnalyzerPanel(file)
 
     override fun createEditor(project: Project, file: VirtualFile): FileEditor =
         DependencyAnalyzerFileEditor(project, file)

@@ -14,7 +14,7 @@ internal object DependencyInsertionPlanner {
         return when (result.ecosystem) {
             Ecosystem.MAVEN -> buildMavenInsertion(fileName, result, version, text)
             Ecosystem.GRADLE -> buildGradleInsertion(fileName, result, version, text)
-            Ecosystem.NPM, Ecosystem.RUST ->
+            Ecosystem.NPM ->
                 ecosystemSupport(result.ecosystem)
                     ?.buildDependencyInsertion(fileName, result, version, text)
         }
@@ -76,7 +76,6 @@ internal object DependencyInsertionPlanner {
         return extensions.firstOrNull { it.ecosystem == ecosystem }
             ?: when (ecosystem) {
                 Ecosystem.NPM -> NpmDependencyEcosystemSupport()
-                Ecosystem.RUST -> RustDependencyEcosystemSupport()
                 else -> null
             }
     }

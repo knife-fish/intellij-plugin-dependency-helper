@@ -18,7 +18,6 @@ dependencies {
         bundledPlugin("org.jetbrains.idea.maven")
         bundledPlugin("org.jetbrains.plugins.gradle")
         bundledPlugin("JavaScript")
-        plugin("com.jetbrains.rust:252.23892.452")
         testFramework(TestFrameworkType.Platform)
     }
 }

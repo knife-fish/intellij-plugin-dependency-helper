@@ -35,7 +35,6 @@ class ProjectRepositoryResolver(private val project: Project) {
                 "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts" ->
                     addGradleRepositories(file, repos[Ecosystem.GRADLE]!!)
                 ".npmrc" -> addNpmRepositories(file, repos[Ecosystem.NPM]!!)
-                "Cargo.toml" -> addTomlRepositories(file, repos[Ecosystem.RUST]!!, setOf("index"))
             }
         }
     }
@@ -43,7 +42,6 @@ class ProjectRepositoryResolver(private val project: Project) {
     private fun collectUserRepositories(repos: MutableMap<Ecosystem, MutableList<RepositorySpec>>) {
         addMavenSettingsRepositories(repos[Ecosystem.MAVEN]!!, Path.of(System.getProperty("user.home"), ".m2", "settings.xml"))
         addNpmRepositories(Path.of(System.getProperty("user.home"), ".npmrc"), repos[Ecosystem.NPM]!!)
-        addTomlRepositories(Path.of(System.getProperty("user.home"), ".cargo", "config.toml"), repos[Ecosystem.RUST]!!, setOf("index"))
     }
 
     private fun addMavenSettingsRepositories(
@@ -91,22 +89,6 @@ class ProjectRepositoryResolver(private val project: Project) {
         }
     }
 
-    private fun addTomlRepositories(file: VirtualFile, target: MutableList<RepositorySpec>, keys: Set<String>) {
-        val text = file.inputStream.bufferedReader().use { it.readText() }
-        extractTomlUrls(text, keys).forEach { url ->
-            val ecosystem = Ecosystem.RUST
-            target += RepositorySpec(ecosystem, normalizeUrl(url), file.path, supportsSearch(url, ecosystem))
-        }
-    }
-
-    private fun addTomlRepositories(path: Path, target: MutableList<RepositorySpec>, keys: Set<String>) {
-        if (!path.exists()) return
-        val text = Files.readString(path)
-        extractTomlUrls(text, keys).forEach { url ->
-            target += RepositorySpec(Ecosystem.RUST, normalizeUrl(url), path.toString(), supportsSearch(url, Ecosystem.RUST))
-        }
-    }
-
     private fun walkProject(root: VirtualFile): Sequence<VirtualFile> = sequence {
         val stack = ArrayDeque<VirtualFile>()
         stack += root
@@ -130,7 +112,6 @@ class ProjectRepositoryResolver(private val project: Project) {
                 url.contains("nexus", ignoreCase = true) ||
                 url.contains("artifactory", ignoreCase = true)
         Ecosystem.NPM -> true
-        Ecosystem.RUST -> url.contains("crates.io")
     }
 
     private fun normalizeUrl(url: String): String = if (url.endsWith("/")) url else "$url/"
@@ -184,18 +165,6 @@ class ProjectRepositoryResolver(private val project: Project) {
         return values
     }
 
-    private fun extractTomlUrls(text: String, keys: Set<String>): List<String> {
-        val found = linkedSetOf<String>()
-        text.lineSequence().forEach { raw ->
-            val line = raw.substringBefore('#').trim()
-            val eq = line.indexOf('=')
-            if (eq <= 0) return@forEach
-            val key = line.substring(0, eq).trim().substringAfterLast('.')
-            if (key !in keys) return@forEach
-            extractQuotedHttpValues(line.substring(eq + 1)).forEach(found::add)
-        }
-        return found.toList()
-    }
 }
 
 internal object MavenSettingsRepositoryParser {

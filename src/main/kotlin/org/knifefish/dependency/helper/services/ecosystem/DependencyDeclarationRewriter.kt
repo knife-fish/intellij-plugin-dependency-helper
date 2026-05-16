@@ -13,7 +13,7 @@ internal object DependencyDeclarationRewriter {
         return when (dependency.ecosystem) {
             Ecosystem.MAVEN -> replaceMavenVersion(declaration, newVersion)
             Ecosystem.GRADLE -> replaceGradleVersion((dependency.declaredVersion ?: dependency.version), declaration, newVersion)
-            Ecosystem.NPM, Ecosystem.RUST ->
+            Ecosystem.NPM ->
                 ecosystemSupport(dependency.ecosystem)
                     ?.replaceVersionInDeclaration(dependency, declaration, newVersion)
         }
@@ -59,7 +59,6 @@ private fun ecosystemSupport(ecosystem: Ecosystem): DependencyEcosystemSupport? 
     return extensions.firstOrNull { it.ecosystem == ecosystem }
         ?: when (ecosystem) {
             Ecosystem.NPM -> NpmDependencyEcosystemSupport()
-            Ecosystem.RUST -> RustDependencyEcosystemSupport()
             else -> null
         }
 }
