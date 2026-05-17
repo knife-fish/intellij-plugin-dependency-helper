@@ -6,12 +6,12 @@ import com.intellij.openapi.fileEditor.FileEditorProvider
 import com.intellij.openapi.fileEditor.FileEditorState
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
-import org.knifefish.dependency.helper.services.external.ExternalDependencySystems
+import org.knifefish.dependency.helper.model.DependencyFiles.ecosystemOf
 
 class DependencyAnalyzerFileEditorProvider : FileEditorProvider {
 
     override fun accept(project: Project, file: VirtualFile): Boolean =
-        ExternalDependencySystems(project).supportsAnalyzerPanel(file)
+        ecosystemOf(file)?.supportsPackageSearch ?: false
 
     override fun createEditor(project: Project, file: VirtualFile): FileEditor =
         DependencyAnalyzerFileEditor(project, file)

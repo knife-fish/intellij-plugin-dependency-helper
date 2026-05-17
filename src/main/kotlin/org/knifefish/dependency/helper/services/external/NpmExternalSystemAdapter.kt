@@ -4,17 +4,15 @@ import com.intellij.javascript.nodejs.PackageJsonData
 import com.intellij.javascript.nodejs.packageJson.PackageJsonFileManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
-import org.knifefish.dependency.helper.model.DependencyCoordinate
-import org.knifefish.dependency.helper.model.Ecosystem
-import org.knifefish.dependency.helper.model.TextRangeMarker
+import org.knifefish.dependency.helper.model.*
 
 /** NPM 外部系统适配器，负责 package.json 的依赖读取与刷新。 */
 internal class NpmExternalSystemAdapter : ExternalDependencySystem {
     /** 当前适配器生态。 */
     override val ecosystem: Ecosystem = Ecosystem.NPM
 
-    /** 仅处理 package.json。 */
-    override fun supports(file: VirtualFile): Boolean = file.name == "package.json"
+    override fun supports(file: VirtualFile): Boolean =
+        DependencyFiles.kindOf(file) == DependencyFileKind.NPM_PACKAGE_JSON
 
     /** 基于 NodeJS 平台模型读取依赖并映射为统一依赖坐标。 */
     override fun scan(project: Project, file: VirtualFile): List<DependencyCoordinate> {

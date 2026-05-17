@@ -3,6 +3,7 @@ package org.knifefish.dependency.helper.services.external
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
 import org.knifefish.dependency.helper.model.DependencyCoordinate
+import org.knifefish.dependency.helper.model.DependencyFiles
 import org.knifefish.dependency.helper.model.Ecosystem
 import org.knifefish.dependency.helper.model.MavenDependencyNodeView
 import org.knifefish.dependency.helper.services.GradleSupport
@@ -12,14 +13,7 @@ internal class GradleExternalSystemAdapter : ExternalDependencySystem {
     /** 当前适配器生态。 */
     override val ecosystem: Ecosystem = Ecosystem.GRADLE
 
-    /** 支持 build/settings 两类 Gradle 脚本。 */
-    override fun supports(file: VirtualFile): Boolean =
-        file.name == "build.gradle" ||
-            file.name == "build.gradle.kts" ||
-            file.name == "settings.gradle" ||
-            file.name == "settings.gradle.kts"
-
-    override fun supportsAnalyzer(file: VirtualFile): Boolean = supports(file) && ecosystem.supportsAnalyzer
+    override fun supports(file: VirtualFile): Boolean = DependencyFiles.isGradle(file)
 
     /** 调用 GradleSupport 解析依赖树，并提取源依赖。 */
     override fun scan(project: Project, file: VirtualFile): List<DependencyCoordinate> {

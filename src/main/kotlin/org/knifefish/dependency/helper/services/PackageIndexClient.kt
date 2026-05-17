@@ -202,6 +202,7 @@ class PackageIndexClient {
     }
 
     fun search(ecosystem: Ecosystem, query: String, repositories: List<RepositorySpec>): List<PackageSearchResult> {
+        if (!ecosystem.supportsPackageSearch) return emptyList()
         val support = ecosystemSupport(ecosystem) ?: return emptyList()
         return support.search(query, repositories, supportContext())
     }
@@ -212,6 +213,7 @@ class PackageIndexClient {
         name: String,
         repositories: List<RepositorySpec>,
     ): List<String> {
+        if (!ecosystem.supportsPackageSearch) return emptyList()
         val support = ecosystemSupport(ecosystem) ?: return emptyList()
         return support.availableVersions(group, name, repositories, supportContext())
     }

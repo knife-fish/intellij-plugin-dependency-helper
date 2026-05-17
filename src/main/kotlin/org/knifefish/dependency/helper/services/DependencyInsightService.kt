@@ -5,7 +5,6 @@ import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
-import com.intellij.openapi.diagnostic.thisLogger
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.FileEditorManager
@@ -173,7 +172,7 @@ class DependencyInsightService(private val project: Project) {
     }
 
     private fun reformatInsertedDependency(targetFile: VirtualFile, startOffset: Int, endOffset: Int) {
-        if (targetFile.name != "pom.xml") {
+        if (!DependencyFiles.isMavenPom(targetFile)) {
             return
         }
         val psiDocumentManager = PsiDocumentManager.getInstance(project)
@@ -219,12 +218,6 @@ class DependencyInsightService(private val project: Project) {
             marker.versionRange?.let { offset in it.startOffset..it.endOffset } == true ||
                 offset in marker.inspectionRange.startOffset..marker.inspectionRange.endOffset
         }
-
-    private fun readText(file: VirtualFile): String? = runCatching {
-        file.inputStream.bufferedReader().use { it.readText() }
-    }.onFailure {
-        thisLogger().warn("Failed to read ${file.path}", it)
-    }.getOrNull()
 
     private fun cacheKey(dependency: DependencyCoordinate, repositories: List<RepositorySpec>): String {
         return "${dependency.key}:${latestVersionPolicy.name}:${repositories.joinToString(",") { it.url }}"

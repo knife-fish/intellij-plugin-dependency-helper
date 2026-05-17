@@ -17,8 +17,6 @@ internal interface ExternalDependencySystem {
     /** 判断当前文件是否由该适配器处理。 */
     fun supports(file: VirtualFile): Boolean = false
 
-    fun supportsAnalyzer(file: VirtualFile): Boolean = false
-
     /** 扫描文件并返回依赖坐标。 */
     fun scan(project: Project, file: VirtualFile): List<DependencyCoordinate> = emptyList()
 

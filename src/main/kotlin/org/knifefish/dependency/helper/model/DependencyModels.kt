@@ -5,8 +5,7 @@ import org.knifefish.dependency.helper.DependencyHelperBundle
 
 enum class Ecosystem(
     private val bundleKey: String,
-    // open fileEditorAnalyzer panel if true
-    val supportsAnalyzer: Boolean,
+    val supportsPackageSearch: Boolean,
     private val defaultRepositoryUrl: String,
     private val defaultRepositorySupportsSearch: Boolean,
 ) {

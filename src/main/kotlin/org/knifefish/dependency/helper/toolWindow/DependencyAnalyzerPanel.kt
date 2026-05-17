@@ -21,10 +21,7 @@ import kotlinx.html.body
 import kotlinx.html.html
 import kotlinx.html.stream.createHTML
 import org.knifefish.dependency.helper.DependencyHelperBundle
-import org.knifefish.dependency.helper.model.Ecosystem
-import org.knifefish.dependency.helper.model.LatestVersionPolicy
-import org.knifefish.dependency.helper.model.MavenDependencyNodeView
-import org.knifefish.dependency.helper.model.PackageSearchResult
+import org.knifefish.dependency.helper.model.*
 import org.knifefish.dependency.helper.services.DependencyInsightService
 import org.knifefish.dependency.helper.services.GradleSupport
 import org.knifefish.dependency.helper.services.MavenSupport
@@ -210,7 +207,7 @@ class DependencyAnalyzerPanel(
         }
 
         val ecosystem = currentEcosystem()
-        if (ecosystem !in setOf(Ecosystem.MAVEN, Ecosystem.GRADLE)) {
+        if (ecosystem?.supportsPackageSearch ?: false) {
             return JPanel(BorderLayout()).apply {
                 add(firstRow, BorderLayout.NORTH)
             }
@@ -267,14 +264,14 @@ class DependencyAnalyzerPanel(
                 "mavenSupport=${mavenSupport?.javaClass?.simpleName ?: "null"}, " +
                 "gradleSupport=${gradleSupport?.javaClass?.simpleName ?: "null"}",
         )
-        if (refreshExternalModel && effectiveTargetFile?.name == "pom.xml" && mavenSupport != null) {
+        if (refreshExternalModel && effectiveTargetFile?.let(DependencyFiles::isMavenPom) == true && mavenSupport != null) {
             thisLogger().info("DependencyHelper reloadDependencies branch: mavenRefresh file=${effectiveTargetFile.path}")
             mavenSupport.refreshMavenProject(effectiveTargetFile) {
                 reloadDependencies(refreshExternalModel = false)
             }
             return
         }
-        if (effectiveTargetFile != null && effectiveTargetFile.name in setOf("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts")) {
+        if (effectiveTargetFile != null && DependencyFiles.isGradle(effectiveTargetFile)) {
             thisLogger().info("DependencyHelper reloadDependencies branch: gradleAnalyze-async file=${effectiveTargetFile.path}")
             ApplicationManager.getApplication().executeOnPooledThread {
                 val resolvedRoots = gradleSupport?.analyze(effectiveTargetFile).orEmpty()
@@ -291,7 +288,7 @@ class DependencyAnalyzerPanel(
         }
         ApplicationManager.getApplication().executeOnPooledThread {
             val resolvedRoots = when {
-                effectiveTargetFile?.name == "pom.xml" && mavenSupport != null -> {
+                effectiveTargetFile?.let(DependencyFiles::isMavenPom) == true && mavenSupport != null -> {
                     val pomTarget = requireNotNull(effectiveTargetFile)
                     thisLogger().info("DependencyHelper reloadDependencies branch: mavenAnalyze file=${pomTarget.path}")
                     val analyzedRoots = mavenSupport.analyze()
@@ -325,13 +322,11 @@ class DependencyAnalyzerPanel(
     }
 
     private fun resolveGradleDisplayFile(file: com.intellij.openapi.vfs.VirtualFile?): com.intellij.openapi.vfs.VirtualFile? {
-        if (file == null || file.name !in setOf("settings.gradle", "settings.gradle.kts")) {
+        if (file == null || !DependencyFiles.isGradleSettings(file)) {
             return file
         }
         val parent = file.parent ?: return file
-        return parent.findChild("build.gradle.kts")
-            ?: parent.findChild("build.gradle")
-            ?: file
+        return DependencyFiles.findChild(parent, DependencyFileKind.GRADLE_BUILD) ?: file
     }
 
     private fun applyRoots(newRoots: List<MavenDependencyNodeView>) {
@@ -365,9 +360,9 @@ class DependencyAnalyzerPanel(
         rebuildTree(filteredRoots)
         val dependencyCount = flatten(filteredRoots).count { it.path.size > 1 }
         publishNotification(when {
-            currentFile?.name == "pom.xml" && mavenSupport != null ->
+            currentFile?.let(DependencyFiles::isMavenPom) == true && mavenSupport != null ->
                 message("Notification.Loaded.Transitive", dependencyCount)
-            currentFile?.name in setOf("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts") && gradleSupport != null ->
+            currentFile?.let(DependencyFiles::isGradle) == true && gradleSupport != null ->
                 message("Notification.Loaded.Transitive", dependencyCount)
             currentFile != null ->
                 message("Notification.Loaded.Declared", dependencyCount)
@@ -424,7 +419,7 @@ class DependencyAnalyzerPanel(
 
     private fun shouldAutoExpandTree(): Boolean {
         val file = currentDependencyTargetFile() ?: currentFile
-        return file?.name !in setOf("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts")
+        return file?.let(DependencyFiles::isGradle) != true
     }
 
     private fun asTreeNode(view: MavenDependencyNodeView): DefaultMutableTreeNode {
@@ -582,7 +577,7 @@ class DependencyAnalyzerPanel(
             return
         }
         val ecosystem = currentEcosystem()
-        if (ecosystem == null) {
+        if (ecosystem == null || !ecosystem.supportsPackageSearch) {
             searchRows.clear()
             renderSearchResults(message("Panel.Search.OpenDependencyFile"))
             return
@@ -651,11 +646,10 @@ class DependencyAnalyzerPanel(
     }
 
     private fun currentDependencyTargetFile(): com.intellij.openapi.vfs.VirtualFile? {
-        return currentFile ?: FileEditorManager.getInstance(project)
+        currentFile?.let(::resolveGradleDisplayFile)?.takeIf(DependencyFiles::supportsPackageSearch)?.let { return it }
+        return FileEditorManager.getInstance(project)
             .selectedFiles
-            .firstOrNull { file ->
-                file.name in setOf("pom.xml", "build.gradle", "build.gradle.kts")
-            }
+            .firstOrNull(DependencyFiles::supportsPackageSearch)
     }
 
     private fun currentEcosystem(): Ecosystem? = currentDependencyTargetFile()?.let { externalSystems.ecosystemFor(it) }

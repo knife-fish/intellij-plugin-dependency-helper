@@ -25,9 +25,7 @@ import com.intellij.openapi.util.Disposer
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VirtualFile
 import org.jetbrains.plugins.gradle.util.GradleConstants
-import org.knifefish.dependency.helper.model.DependencyCoordinate
-import org.knifefish.dependency.helper.model.MavenDependencyNodeView
-import org.knifefish.dependency.helper.model.TextRangeMarker
+import org.knifefish.dependency.helper.model.*
 import java.nio.file.Path
 import java.nio.file.Paths
 import java.util.*
@@ -389,8 +387,7 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
     private fun findGradleSettingsFile(file: VirtualFile): VirtualFile? {
         var current: VirtualFile? = if (file.isDirectory) file else file.parent
         while (current != null) {
-            current.findChild("settings.gradle.kts")?.let { return it }
-            current.findChild("settings.gradle")?.let { return it }
+            DependencyFiles.findChild(current, DependencyFileKind.GRADLE_SETTINGS)?.let { return it }
             current = current.parent
         }
         return null
@@ -1011,19 +1008,17 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
     }
 
     private fun resolveAnalysisFile(file: VirtualFile): VirtualFile {
-        if (file.name !in GRADLE_SETTINGS_FILE_NAMES) {
+        if (file.name !in DependencyFileKind.GRADLE_SETTINGS.fileNames) {
             return file
         }
         val root = findGradleProjectRoot(file) ?: return file
-        return root.findChild("build.gradle.kts")
-            ?: root.findChild("build.gradle")
-            ?: file
+        return DependencyFiles.findChild(root, DependencyFileKind.GRADLE_BUILD) ?: file
     }
 
     private companion object {
         val GRADLE_SYSTEM_ID = ProjectSystemId("GRADLE")
-        val GRADLE_FILE_NAMES = setOf("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts")
-        val GRADLE_SETTINGS_FILE_NAMES = setOf("settings.gradle", "settings.gradle.kts")
+        val GRADLE_FILE_NAMES = DependencyFileKind.GRADLE_BUILD.fileNames + DependencyFileKind.GRADLE_SETTINGS.fileNames
+        val GRADLE_SETTINGS_FILE_NAMES = DependencyFileKind.GRADLE_SETTINGS.fileNames
         val GRADLE_CATALOG_ACCESSOR_PATTERN = Regex("""(?:\w+\(\s*)?([A-Za-z][A-Za-z0-9_]*\.[A-Za-z0-9_.-]+)""")
         const val MAX_GRADLE_TREE_DEPTH = 4
         const val MAX_GRADLE_CHILDREN_PER_NODE = 50

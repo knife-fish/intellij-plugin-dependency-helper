@@ -18,10 +18,7 @@ import org.jetbrains.idea.maven.model.MavenArtifact
 import org.jetbrains.idea.maven.model.MavenArtifactNode
 import org.jetbrains.idea.maven.project.MavenProject
 import org.jetbrains.idea.maven.project.MavenProjectsManager
-import org.knifefish.dependency.helper.model.DependencyCoordinate
-import org.knifefish.dependency.helper.model.Ecosystem
-import org.knifefish.dependency.helper.model.MavenDependencyNodeView
-import org.knifefish.dependency.helper.model.TextRangeMarker
+import org.knifefish.dependency.helper.model.*
 import org.knifefish.dependency.helper.util.readAction
 
 class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
@@ -29,7 +26,7 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
     private fun mavenProjectsManager(): MavenProjectsManager = MavenProjectsManager.getInstance(project)
 
     override fun enrichDependencies(file: VirtualFile, dependencies: List<DependencyCoordinate>): List<DependencyCoordinate> {
-        if (file.name != "pom.xml") {
+        if (!DependencyFiles.isMavenPom(file)) {
             return dependencies
         }
         return readAction {

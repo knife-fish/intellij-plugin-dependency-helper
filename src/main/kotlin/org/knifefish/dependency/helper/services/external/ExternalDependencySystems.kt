@@ -22,8 +22,6 @@ internal class ExternalDependencySystems(private val project: Project) {
     /** 判断是否存在可处理该文件的外部系统适配器。 */
     fun supports(file: VirtualFile): Boolean = systems.any { it.supports(file) }
 
-    fun supportsAnalyzerPanel(file: VirtualFile): Boolean = systems.any { it.supportsAnalyzer(file) }
-
     /** 获取可处理该文件的生态类型。 */
     fun ecosystemFor(file: VirtualFile): Ecosystem? = systems.firstOrNull { it.supports(file) }?.ecosystem
 

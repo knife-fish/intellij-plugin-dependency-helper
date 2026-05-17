@@ -28,7 +28,7 @@ object DependencyUpgradeHtmlRenderer {
         val content = createHTML().div {
             classes = setOf(DocumentationMarkup.CLASS_CONTENT)
             p {
-                b { +DependencyHelperBundle.message("Doc.DependencyUpdateAvailable") }
+                +DependencyHelperBundle.message("Doc.DependencyUpdateAvailable")
             }
             table {
                 style = "border-spacing: 0"

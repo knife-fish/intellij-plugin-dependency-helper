@@ -3,6 +3,8 @@ package org.knifefish.dependency.helper.repository
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.project.guessProjectDir
 import com.intellij.openapi.vfs.VirtualFile
+import org.knifefish.dependency.helper.model.DependencyFileKind
+import org.knifefish.dependency.helper.model.DependencyFiles
 import org.knifefish.dependency.helper.model.Ecosystem
 import org.knifefish.dependency.helper.model.RepositorySpec
 import org.knifefish.dependency.helper.util.readAction
@@ -30,11 +32,12 @@ class ProjectRepositoryResolver(private val project: Project) {
 
     private fun collectProjectRepositories(root: VirtualFile, repos: MutableMap<Ecosystem, MutableList<RepositorySpec>>) {
         walkProject(root).forEach { file ->
-            when (file.name) {
-                "pom.xml" -> addPomRepositories(file, repos[Ecosystem.MAVEN]!!)
-                "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts" ->
-                    addGradleRepositories(file, repos[Ecosystem.GRADLE]!!)
-                ".npmrc" -> addNpmRepositories(file, repos[Ecosystem.NPM]!!)
+            when (DependencyFiles.kindOf(file)) {
+                DependencyFileKind.MAVEN_POM -> addPomRepositories(file, repos[Ecosystem.MAVEN]!!)
+                DependencyFileKind.GRADLE_BUILD,
+                DependencyFileKind.GRADLE_SETTINGS -> addGradleRepositories(file, repos[Ecosystem.GRADLE]!!)
+                DependencyFileKind.NPM_PACKAGE_JSON,
+                null -> if (file.name == ".npmrc") addNpmRepositories(file, repos[Ecosystem.NPM]!!)
             }
         }
     }
