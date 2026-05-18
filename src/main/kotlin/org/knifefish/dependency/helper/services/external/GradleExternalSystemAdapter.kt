@@ -5,7 +5,6 @@ import com.intellij.openapi.vfs.VirtualFile
 import org.knifefish.dependency.helper.model.DependencyCoordinate
 import org.knifefish.dependency.helper.model.DependencyFiles
 import org.knifefish.dependency.helper.model.Ecosystem
-import org.knifefish.dependency.helper.model.MavenDependencyNodeView
 import org.knifefish.dependency.helper.services.GradleSupport
 
 /** Gradle 外部系统适配器，负责 Gradle 文件的依赖处理流程。 */
@@ -18,13 +17,7 @@ internal class GradleExternalSystemAdapter : ExternalDependencySystem {
     /** 调用 GradleSupport 解析依赖树，并提取源依赖。 */
     override fun scan(project: Project, file: VirtualFile): List<DependencyCoordinate> {
         val support = project.getService(GradleSupport::class.java) ?: return emptyList()
-        val declared = support.declaredDependencies(file)
-        if (declared.isNotEmpty()) {
-            return declared
-        }
-        val out = mutableListOf<DependencyCoordinate>()
-        support.analyze(file).forEach { root -> collect(root, file, out) }
-        return out
+        return support.declaredDependencies(file)
     }
 
     /** 对 Gradle 依赖做版本/属性/目录等补全。 */
@@ -46,9 +39,4 @@ internal class GradleExternalSystemAdapter : ExternalDependencySystem {
         return support.upgradeDependency(dependency, newVersion)
     }
 
-    /** 深度遍历依赖树，收集属于当前文件的源依赖。 */
-    private fun collect(node: MavenDependencyNodeView, file: VirtualFile, out: MutableList<DependencyCoordinate>) {
-        node.sourceDependency?.takeIf { it.file.path == file.path }?.let(out::add)
-        node.children.forEach { collect(it, file, out) }
-    }
 }

@@ -1,34 +1,28 @@
 package org.knifefish.dependency.helper.services
 
-import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.diagnostic.thisLogger
-import com.intellij.openapi.externalSystem.dependency.analyzer.DependencyAnalyzerContributor
-import com.intellij.openapi.externalSystem.dependency.analyzer.DependencyAnalyzerDependency
-import com.intellij.openapi.externalSystem.dependency.analyzer.DependencyAnalyzerExtension
-import com.intellij.openapi.externalSystem.dependency.analyzer.DependencyAnalyzerProject
 import com.intellij.openapi.externalSystem.importing.ImportSpecBuilder
+import com.intellij.openapi.externalSystem.model.DataNode
+import com.intellij.openapi.externalSystem.model.ProjectKeys
 import com.intellij.openapi.externalSystem.model.ProjectSystemId
-import com.intellij.openapi.externalSystem.model.project.dependencies.ArtifactDependencyNode
-import com.intellij.openapi.externalSystem.model.project.dependencies.DependencyNode
-import com.intellij.openapi.externalSystem.model.project.dependencies.ProjectDependencyNode
-import com.intellij.openapi.externalSystem.model.project.dependencies.ReferenceNode
+import com.intellij.openapi.externalSystem.model.project.dependencies.*
 import com.intellij.openapi.externalSystem.service.execution.ProgressExecutionMode
 import com.intellij.openapi.externalSystem.service.project.ExternalProjectRefreshCallback
 import com.intellij.openapi.externalSystem.util.ExternalSystemApiUtil
 import com.intellij.openapi.externalSystem.util.ExternalSystemUtil
 import com.intellij.openapi.fileEditor.FileDocumentManager
-import com.intellij.openapi.module.ModuleManager
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.util.Disposer
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.psi.PsiElement
+import com.intellij.psi.PsiManager
 import org.jetbrains.plugins.gradle.util.GradleConstants
 import org.knifefish.dependency.helper.model.*
+import org.knifefish.dependency.helper.util.readAction
 import java.nio.file.Path
 import java.nio.file.Paths
-import java.util.*
 
 class DefaultGradleSupport(private val project: Project) : GradleSupport {
 
@@ -38,43 +32,15 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
         }
         val analysisFile = resolveAnalysisFile(file)
         val projectPath = findGradleProjectPath(analysisFile)
-        val analyzerContext = findGradleAnalyzerContext(projectPath) ?: run {
-            thisLogger().info(
-                "DependencyHelper Gradle analyze: file=${file.path}, analysisFile=${analysisFile.path}, projectPath=$projectPath, " +
-                    "resolvedScopes=0, fallback=declared-no-module",
-            )
-            return buildDeclaredDependencyRoots(file)
+        val graphContext = findGradleDependencyGraphContext(projectPath)
+        if (graphContext == null) {
+            return buildDeclaredDependencyRoot(file, analysisFile)
+        }
+        val components = graphContext.dependencies.componentsDependencies
+        if (components.isEmpty()) {
+            return emptyList()
         }
 
-        thisLogger().info(
-            "DependencyHelper Gradle analyze collecting: file=${file.path}, analysisFile=${analysisFile.path}, " +
-                "projectPath=$projectPath, module=${analyzerContext.externalProject.module.name}",
-        )
-        val analyzerDependencies = runCatching {
-            analyzerContext.use {
-                analyzerContext.contributor.getDependencies(analyzerContext.externalProject)
-            }
-        }.getOrElse {
-            thisLogger().warn("DependencyHelper Gradle analyze failed for ${file.path} using ${analysisFile.path}", it)
-            emptyList()
-        }
-        thisLogger().info(
-            "DependencyHelper Gradle analyze collected: file=${file.path}, analysisFile=${analysisFile.path}, " +
-                "projectPath=$projectPath, dependencies=${analyzerDependencies.size}",
-        )
-        if (analyzerDependencies.isEmpty()) {
-            thisLogger().info(
-                "DependencyHelper Gradle analyze: file=${file.path}, analysisFile=${analysisFile.path}, projectPath=$projectPath, " +
-                    "resolvedScopes=0, fallback=declared-empty",
-            )
-            return buildDeclaredDependencyRoots(file)
-        }
-
-        // Gradle 解析后的依赖树不一定保留“直接声明依赖”的边界，
-        // 这里先从脚本文本提取直接依赖，再把解析树节点映射回这些直接依赖。
-        val directDependencies = declaredDependencies(file)
-        val directDependenciesByIdentity = directDependencies.associateBy { dependencyIdentity(it.group, it.name, it.version) }
-        val directDependenciesByKey = directDependencies.associateBy { dependencyKey(it.group, it.name) }
         val projectName = file.name
         val rootPath = listOf(file.path)
         val root = MavenDependencyNodeView(
@@ -88,86 +54,229 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
             path = rootPath,
             sourceDependency = null,
         )
-        val resolvedDirectNodes = mutableListOf<MavenDependencyNodeView>()
-        val occurrenceTreesByDirectKey = linkedMapOf<String, MutableList<MavenDependencyNodeView>>()
-        val childrenByParent = analyzerDependencies.childrenByParent()
-        analyzerDependencies.asSequence()
-            .filter { it.parent == null }
-            .flatMap { childrenByParent.childrenOf(it).asSequence() }
-            .forEach { dependency ->
-                val occurrence = buildAnalyzerDependencyNode(
-                    ownerFile = file,
-                    ownerProjectName = projectName,
-                    dependency = dependency,
-                    parentPath = rootPath,
-                    childrenByParent = childrenByParent,
-                ) ?: return@forEach
-                resolvedDirectNodes += occurrence
-                val directKey = directDependencyKey(occurrence, directDependenciesByIdentity, directDependenciesByKey)
-                if (directKey != null) {
-                    occurrenceTreesByDirectKey.getOrPut(directKey) { mutableListOf() }.add(occurrence)
-                }
-            }
-        directDependencies.forEach { dependency ->
-            val directKey = dependencyKey(dependency.group, dependency.name)
-            val rootChild = MavenDependencyNodeView(
+
+        components.forEach { component ->
+            root.children += buildComponentDependencyNodes(
+                ownerFile = file,
                 ownerProjectName = projectName,
-                ownerProjectFile = file,
-                groupId = dependency.group.orEmpty(),
-                artifactId = dependency.name,
-                version = dependency.version,
-                scope = dependency.scope,
-                packaging = null,
-                path = rootPath + dependency.displayName,
-                sourceDependency = dependency,
+                component = component,
+                parentPath = rootPath,
             )
-            occurrenceTreesByDirectKey[directKey].orEmpty().forEach { occurrence ->
-                occurrence.children.forEach { child ->
-                    mergeInto(rootChild.children, child)
-                }
-            }
-            root.children += rootChild
         }
-        resolvedDirectNodes.forEach { occurrence ->
-            val directKey = dependencyKey(occurrence.groupId, occurrence.artifactId)
-            if (directDependenciesByKey.containsKey(directKey)) {
-                return@forEach
-            }
-            mergeInto(root.children, occurrence)
+        val deduplicatedRootChildren = deduplicateGradleNodes(root.children)
+        root.children.run {
+            clear()
+            addAll(deduplicatedRootChildren)
         }
-        thisLogger().info(
-                "DependencyHelper Gradle analyze: file=${file.path}, analysisFile=${analysisFile.path}, projectPath=$projectPath, " +
-                "resolvedDependencies=${analyzerDependencies.size}, " +
-                "topLevel=${root.children.size}, topLevelChildren=${root.children.joinToString { "${it.displayName}:${it.children.size}" }}, " +
-                "nodeCount=${flattenResolvedNodes(root).size}",
-        )
+        logGradleTreeDiagnostics(file, root)
         return listOf(root)
     }
 
+    private fun buildDeclaredDependencyRoot(
+        file: VirtualFile,
+        analysisFile: VirtualFile,
+    ): List<MavenDependencyNodeView> {
+        val (text, locations) = collectGradleEditorLocationsFromDocument(analysisFile) ?: return emptyList()
+        val declaredLocations = locations
+            .filter { it.scope in GRADLE_DEPENDENCY_SCOPES }
+            .distinctBy { "${it.scope}:${it.group}:${it.name}:${it.version}:${it.displayRange.startOffset}" }
+        if (declaredLocations.isEmpty()) {
+            return emptyList()
+        }
+
+        val projectName = file.name
+        val rootPath = listOf(file.path)
+        val root = MavenDependencyNodeView(
+            ownerProjectName = projectName,
+            ownerProjectFile = file,
+            groupId = "",
+            artifactId = projectName,
+            version = "",
+            scope = "file",
+            packaging = null,
+            path = rootPath,
+            sourceDependency = null,
+        )
+        declaredLocations.forEach { location ->
+            val coordinate = location.toDependencyCoordinate(analysisFile, text)
+            root.children += MavenDependencyNodeView(
+                ownerProjectName = projectName,
+                ownerProjectFile = analysisFile,
+                groupId = location.group,
+                artifactId = location.name,
+                version = location.version,
+                scope = location.scope,
+                packaging = null,
+                path = rootPath + location.pathSegment(),
+                sourceDependency = coordinate,
+            )
+        }
+        return listOf(root)
+    }
+
+    private fun buildComponentDependencyNodes(
+        ownerFile: VirtualFile,
+        ownerProjectName: String,
+        component: ComponentDependencies,
+        parentPath: List<String>,
+    ): List<MavenDependencyNodeView> {
+        return listOfNotNull(
+            component.compileDependenciesGraph?.let { "compile" to it },
+            component.runtimeDependenciesGraph?.let { "runtime" to it },
+        ).flatMap { (scope, graph) ->
+            val sourceNodesById = collectSourceNodesById(graph.dependencies)
+            graph.dependencies.mapNotNull { dependency ->
+                buildResolvedGradleNode(
+                    ownerFile = ownerFile,
+                    ownerProjectName = ownerProjectName,
+                    node = dependency,
+                    parentPath = parentPath,
+                    directDependency = true,
+                    inheritedScope = scope,
+                    sourceNodesById = sourceNodesById,
+                    visitingIds = emptySet(),
+                )
+            }
+        }.let(::deduplicateGradleNodes)
+    }
+
+    private fun deduplicateGradleNodes(nodes: List<MavenDependencyNodeView>): MutableList<MavenDependencyNodeView> {
+        val mergedByKey = linkedMapOf<String, MavenDependencyNodeView>()
+        nodes.forEach { node ->
+            val key = "${node.groupId}:${node.artifactId}:${node.version}"
+            val existing = mergedByKey[key]
+            if (existing == null) {
+                mergedByKey[key] = node.copy(children = deduplicateGradleNodes(node.children))
+            } else {
+                val mergedScope = preferredScope(existing.scope, node.scope)
+                if (mergedScope != existing.scope) {
+                    mergedByKey[key] = existing.copy(scope = mergedScope, children = existing.children)
+                }
+                existing.children += node.children
+                val mergedChildren = deduplicateGradleNodes(existing.children)
+                existing.children.run {
+                    clear()
+                    addAll(mergedChildren)
+                }
+            }
+        }
+        return mergedByKey.values.toMutableList()
+    }
+
+    private fun preferredScope(left: String?, right: String?): String? {
+        if (left == null) return right
+        if (right == null) return left
+        return if (scopePriority(left) <= scopePriority(right)) left else right
+    }
+
+    private fun scopePriority(scope: String): Int {
+        val normalized = scope.lowercase()
+        return when {
+            normalized == "api" -> 0
+            normalized == "implementation" || normalized == "compile" -> 1
+            normalized.contains("compileonly") -> 2
+            normalized.contains("runtime") -> 3
+            normalized.contains("test") -> 4
+            else -> 5
+        }
+    }
+
+    private fun collectSourceNodesById(nodes: List<DependencyNode>): MutableMap<Long, DependencyNode> {
+        val sourceNodesById = mutableMapOf<Long, DependencyNode>()
+        val visiting = mutableSetOf<Long>()
+        fun visit(node: DependencyNode) {
+            if (!visiting.add(node.id)) {
+                return
+            }
+            if (node !is ReferenceNode) {
+                sourceNodesById.putIfAbsent(node.id, node)
+            }
+            node.dependencies.forEach(::visit)
+            visiting.remove(node.id)
+        }
+        nodes.forEach(::visit)
+        return sourceNodesById
+    }
+
     override fun enrichDependencies(file: VirtualFile, dependencies: List<DependencyCoordinate>): List<DependencyCoordinate> {
-        if (!isGradleFile(file)) {
+        return dependencies
+    }
+
+    override fun attachEditorLocations(file: VirtualFile, dependencies: List<DependencyCoordinate>): List<DependencyCoordinate> {
+        if (!isGradleFile(file) || dependencies.isEmpty()) {
             return dependencies
         }
-        val buildText = file.inputStream.bufferedReader().use { it.readText() }
-        val gradleProperties = findGradlePropertiesFile(file)?.inputStream?.bufferedReader()?.use { it.readText() }
-        val catalogSources = loadVersionCatalogSources(file)
-        thisLogger().info(
-            "DependencyHelper Gradle enrichDependencies: file=${file.path}, gradleProperties=${findGradlePropertiesFile(file)?.path}, " +
-                "catalogs=${catalogSources.entries.joinToString { "${it.key}->file=${it.value.file.path}, editable=${it.value.editableFile?.path}, gav=${it.value.sourceCoordinate}" }}",
-        )
-        val enriched = enrichGradleDependencies(buildText, gradleProperties, catalogSources, dependencies)
-        thisLogger().info(
-            "DependencyHelper Gradle enrichDependencies result: " +
-                enriched.joinToString { "${it.declaredVersion ?: it.displayName}=>${it.displayName}:${it.version.ifBlank { "unknown" }}" },
-        )
-        return enriched
+        val (text, locations) = collectGradleEditorLocationsFromDocument(file) ?: return dependencies
+        if (locations.isEmpty()) {
+            return dependencies
+        }
+        val used = mutableSetOf<Int>()
+        return dependencies.map { dependency ->
+            if (dependency.ecosystem != Ecosystem.GRADLE || isLocated(dependency)) {
+                dependency
+            } else {
+                findBestLocationMatch(dependency, locations, used, text)?.let { location ->
+                    used += location.displayRange.startOffset
+                    dependency.copy(
+                        declaredVersion = location.declaredVersion,
+                        declarationText = location.declarationText,
+                        lineNumber = text.take(location.displayRange.startOffset).count { it == '\n' } + 1,
+                        versionRange = location.versionRange,
+                        displayRange = location.displayRange,
+                        inspectionRange = location.inspectionRange,
+                    )
+                } ?: dependency
+            }
+        }
     }
+
+    private fun findBestLocationMatch(
+        dependency: DependencyCoordinate,
+        locations: List<GradleEditorLocation>,
+        used: Set<Int>,
+        text: String,
+    ): GradleEditorLocation? {
+        val candidates = locations.filter { location ->
+            location.displayRange.startOffset !in used &&
+                location.group == dependency.group &&
+                location.name == dependency.name
+        }
+        if (candidates.isEmpty()) {
+            return null
+        }
+        return candidates.minWithOrNull(
+            compareBy<GradleEditorLocation>(
+                { location -> if (location.scope == dependency.scope) 0 else 1 },
+                { location -> if (location.version == dependency.version) 0 else 1 },
+                { location -> kotlin.math.abs(lineNumberAt(text, location.displayRange.startOffset) - dependency.lineNumber) },
+                { it.displayRange.startOffset },
+            ),
+        )
+    }
+
+    private fun lineNumberAt(text: String, offset: Int): Int =
+        text.take(offset.coerceAtLeast(0).coerceAtMost(text.length)).count { it == '\n' } + 1
 
     override fun declaredDependencies(file: VirtualFile): List<DependencyCoordinate> {
         if (!isGradleFile(file)) {
             return emptyList()
         }
-        return enrichDependencies(file, collectDeclaredGradleDependencies(file, resolveAnalysisFile(file)))
+        val resolvedDependencies = if (file.name in DependencyFileKind.GRADLE_BUILD.fileNames) {
+            collectDeclaredDependencyCoordinates(file)
+                .distinctBy { "${it.scope}:${it.group}:${it.name}:${it.version}" }
+        } else {
+            emptyList()
+        }
+        val pluginDependencies = declaredPluginDependencies(file)
+        return (resolvedDependencies + pluginDependencies)
+            .distinctBy { "${it.scope}:${it.group}:${it.name}:${it.version}:${it.displayRange.startOffset}" }
+    }
+
+    private fun collectDeclaredDependencyCoordinates(file: VirtualFile): List<DependencyCoordinate> {
+        val (text, locations) = collectGradleEditorLocationsFromDocument(file) ?: return emptyList()
+        return locations
+            .filter { it.scope in GRADLE_DEPENDENCY_SCOPES }
+            .map { it.toDependencyCoordinate(file, text) }
     }
 
     override fun upgradeDependency(dependency: DependencyCoordinate, newVersion: String): Boolean {
@@ -180,6 +289,9 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
         }
         if (dependency.versionRange == null) {
             return replaceManagedPluginVersion(dependency.file, dependency, newVersion)
+        }
+        if (dependency.scope in GRADLE_PLUGIN_SCOPES) {
+            return replaceGradleRange(dependency.file, dependency.versionRange, newVersion)
         }
         return false
     }
@@ -265,6 +377,22 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
             refreshGradleProject(file)
         }
         return updatedAny
+    }
+
+    private fun replaceGradleRange(file: VirtualFile, range: TextRangeMarker, newVersion: String): Boolean {
+        val document = FileDocumentManager.getInstance().getDocument(file) ?: return false
+        if (range.endOffset > document.textLength) {
+            return false
+        }
+        WriteCommandAction.runWriteCommandAction(project, Runnable {
+            if (range.endOffset > document.textLength) {
+                return@Runnable
+            }
+            document.replaceString(range.startOffset, range.endOffset, newVersion)
+            FileDocumentManager.getInstance().saveDocument(document)
+        })
+        refreshGradleProject(file)
+        return true
     }
 
     private fun replaceCatalogVersion(target: GradleCatalogUpgradeTarget, newVersion: String): Boolean {
@@ -375,15 +503,6 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
         return null
     }
 
-    private fun findDefaultVersionCatalogFile(file: VirtualFile): VirtualFile? {
-        var current: VirtualFile? = if (file.isDirectory) file else file.parent
-        while (current != null) {
-            current.findChild("gradle")?.findChild("libs.versions.toml")?.let { return it }
-            current = current.parent
-        }
-        return null
-    }
-
     private fun findGradleSettingsFile(file: VirtualFile): VirtualFile? {
         var current: VirtualFile? = if (file.isDirectory) file else file.parent
         while (current != null) {
@@ -405,15 +524,11 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
         }
         if (settingsFile != null) {
             val settingsText = settingsFile.inputStream.bufferedReader().use { it.readText() }
-            parseSettingsCatalogMappings(settingsFile, settingsText).forEach { (name, catalogFileOrCoordinate) ->
+            parseSettingsCatalogMappings(Paths.get(settingsFile.parent.path), settingsText).forEach { (name, catalogFileOrCoordinate) ->
                 val catalogSource = resolveSettingsCatalogSource(settingsFile, name, catalogFileOrCoordinate) ?: return@forEach
                 result[name] = catalogSource
             }
         }
-        thisLogger().info(
-            "DependencyHelper Gradle loadVersionCatalogSources: file=${file.path}, result=" +
-                result.entries.joinToString { "${it.key}[file=${it.value.file.path}, editable=${it.value.editableFile?.path}, gav=${it.value.sourceCoordinate}]" },
-        )
         return result
     }
 
@@ -495,162 +610,30 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
         return result.toList()
     }
 
-    /** Gradle 解析模型不可用时，基于脚本文本构建声明依赖树。 */
-    private fun buildDeclaredDependencyRoots(file: VirtualFile): List<MavenDependencyNodeView> {
-        // Gradle 模型不可用时的兜底：直接展示脚本文本中的声明依赖。
-        // 关键变量：从脚本提取出的声明依赖列表。
-        val dependencies = declaredDependencies(file)
-        if (dependencies.isEmpty()) {
-            return emptyList()
-        }
-        // 关键变量：分析根节点显示名称。
-        val projectName = file.name
-        // 关键变量：树路径起点（当前文件路径）。
-        val rootPath = listOf(file.path)
-        val root = MavenDependencyNodeView(
-            ownerProjectName = projectName,
-            ownerProjectFile = file,
-            groupId = "",
-            artifactId = projectName,
-            version = "",
-            scope = "file",
-            packaging = null,
-            path = rootPath,
-            sourceDependency = null,
-        )
-        dependencies.forEach { dependency ->
-            root.children += MavenDependencyNodeView(
-                ownerProjectName = projectName,
-                ownerProjectFile = file,
-                groupId = dependency.group.orEmpty(),
-                artifactId = dependency.name,
-                version = dependency.version,
-                scope = dependency.scope,
-                packaging = null,
-                path = rootPath + dependency.displayName,
-                sourceDependency = dependency,
-            )
-        }
-        return listOf(root)
-    }
-
-    /** 轻量提取 Gradle 脚本中的直接依赖声明，用于源码定位和 editor inlay。 */
-    private fun collectDeclaredGradleDependencies(ownerFile: VirtualFile, sourceFile: VirtualFile): List<DependencyCoordinate> {
-        if (!isGradleFile(sourceFile)) return emptyList()
-        val text = runCatching { sourceFile.inputStream.bufferedReader().use { it.readText() } }.getOrNull() ?: return emptyList()
-        val dependencies = mutableListOf<DependencyCoordinate>()
-        var lineStart = 0
-        var lineNumber = 1
-        while (lineStart < text.length) {
-            val lineEnd = text.indexOf('\n', lineStart).let { if (it < 0) text.length else it }
-            val line = text.substring(lineStart, lineEnd)
-            dependencyFromGradleLine(ownerFile, line, lineStart, lineEnd, lineNumber)?.let(dependencies::add)
-            lineStart = lineEnd + 1
-            lineNumber++
-        }
-        return dependencies.distinctBy { "${it.scope}:${it.declaredVersion}:${it.inspectionRange.startOffset}" }
-    }
-
-    private fun dependencyFromGradleLine(
-        ownerFile: VirtualFile,
-        line: String,
-        lineStart: Int,
-        lineEnd: Int,
-        lineNumber: Int,
-    ): DependencyCoordinate? {
-        val trimmed = line.trimStart()
-        if (trimmed.startsWith("//") || trimmed.startsWith("*")) {
-            return null
-        }
-        val scope = trimmed.takeWhile { it.isLetterOrDigit() || it == '_' || it == '.' }
-        if (scope.isBlank()) {
-            return null
-        }
-        val rest = trimmed.drop(scope.length).trimStart()
-        val declaration = line.trim()
-        val inspectionRange = TextRangeMarker(lineStart, lineEnd)
-        val coordinate = firstQuotedValue(rest)?.takeIf { it.count { ch -> ch == ':' } >= 1 }
-        if (coordinate != null) {
-            val parts = coordinate.split(':')
-            if (parts.size >= 2) {
-                val version = parts.getOrNull(2).orEmpty()
-                val displayOffset = if (version.isNotBlank()) {
-                    line.lastIndexOf(version).takeIf { it >= 0 }?.let { lineStart + it }
-                } else {
-                    line.lastIndexOf(parts[1]).takeIf { it >= 0 }?.let { lineStart + it + parts[1].length }
-                } ?: lineEnd
-                val range = if (version.isNotBlank()) TextRangeMarker(displayOffset, displayOffset + version.length) else null
-                return DependencyCoordinate(
-                    ecosystem = org.knifefish.dependency.helper.model.Ecosystem.GRADLE,
-                    group = parts[0],
-                    name = parts[1],
-                    version = version,
-                    declaredVersion = version.takeIf { it.isNotBlank() },
-                    scope = scope,
-                    file = ownerFile,
-                    declarationText = declaration,
-                    lineNumber = lineNumber,
-                    versionRange = range,
-                    displayRange = range ?: TextRangeMarker(displayOffset, displayOffset),
-                    inspectionRange = inspectionRange,
-                )
-            }
-        }
-
-        val accessor = GRADLE_CATALOG_ACCESSOR_PATTERN.find(rest)?.groupValues?.get(1) ?: return null
-        val accessorStart = line.indexOf(accessor).takeIf { it >= 0 } ?: return null
-        val displayOffset = lineStart + accessorStart + accessor.length
-        return DependencyCoordinate(
-            ecosystem = org.knifefish.dependency.helper.model.Ecosystem.GRADLE,
-            group = null,
-            name = accessor.substringAfterLast('.'),
-            version = "",
-            declaredVersion = accessor,
-            scope = scope,
-            file = ownerFile,
-            declarationText = declaration,
-            lineNumber = lineNumber,
-            versionRange = null,
-            displayRange = TextRangeMarker(displayOffset, displayOffset),
-            inspectionRange = inspectionRange,
-        )
-    }
-
-    private fun firstQuotedValue(text: String): String? {
-        val quote = text.indexOfAny(charArrayOf('"', '\''))
-        if (quote < 0) return null
-        val end = text.indexOf(text[quote], quote + 1)
-        if (end <= quote) return null
-        return text.substring(quote + 1, end)
-    }
-
     private fun buildResolvedGradleNode(
         ownerFile: VirtualFile,
         ownerProjectName: String,
         node: DependencyNode,
         inheritedScope: String,
         parentPath: List<String>,
-        directDependenciesByIdentity: Map<String, DependencyCoordinate>,
-        directDependenciesByKey: Map<String, DependencyCoordinate>,
+        directDependency: Boolean,
         sourceNodesById: MutableMap<Long, DependencyNode>,
         visitingIds: Set<Long>,
         depth: Int = 0,
-    ): MavenDependencyNodeView {
+    ): MavenDependencyNodeView? {
         val currentVisitingIds = visitingIds + node.id
         if (node is ReferenceNode) {
             if (visitingIds.contains(node.id)) {
-                return buildReferencePlaceholderNode(ownerFile, ownerProjectName, inheritedScope, parentPath, node.id)
+                return null
             }
-            val referencedNode = sourceNodesById[node.id]
-                ?: return buildReferencePlaceholderNode(ownerFile, ownerProjectName, inheritedScope, parentPath, node.id)
+            val referencedNode = sourceNodesById[node.id] ?: return null
             return buildResolvedGradleNode(
                 ownerFile = ownerFile,
                 ownerProjectName = ownerProjectName,
                 node = referencedNode,
                 inheritedScope = inheritedScope,
                 parentPath = parentPath,
-                directDependenciesByIdentity = directDependenciesByIdentity,
-                directDependenciesByKey = directDependenciesByKey,
+                directDependency = directDependency,
                 sourceNodesById = sourceNodesById,
                 visitingIds = currentVisitingIds,
                 depth = depth,
@@ -659,8 +642,6 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
         sourceNodesById[node.id] = node
         val view = when (node) {
             is ArtifactDependencyNode -> {
-                val key = dependencyIdentity(node.group, node.module, node.version)
-                val fallbackKey = dependencyKey(node.group, node.module)
                 MavenDependencyNodeView(
                     ownerProjectName = ownerProjectName,
                     ownerProjectFile = ownerFile,
@@ -672,11 +653,9 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
                     path = parentPath + "${
                         if (node.group.isBlank()) node.module else "${node.group}:${node.module}"
                     }",
-                    sourceDependency = if (parentPath.size == 1) {
-                        directDependenciesByIdentity[key] ?: directDependenciesByKey[fallbackKey]
-                    } else {
-                        null
-                    },
+                    sourceDependency = if (directDependency) {
+                        node.toDependencyCoordinate(ownerFile, inheritedScope)
+                    } else null,
                 )
             }
             is ProjectDependencyNode -> MavenDependencyNodeView(
@@ -696,21 +675,230 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
             return view
         }
         node.dependencies.forEach { child ->
-            view.children += buildResolvedGradleNode(
+            buildResolvedGradleNode(
                 ownerFile = ownerFile,
                 ownerProjectName = ownerProjectName,
                 node = child,
                 inheritedScope = inheritedScope,
                 parentPath = view.path,
-                directDependenciesByIdentity = directDependenciesByIdentity,
-                directDependenciesByKey = directDependenciesByKey,
+                directDependency = false,
                 sourceNodesById = sourceNodesById,
                 visitingIds = currentVisitingIds,
                 depth = depth + 1,
-            )
+            )?.let { view.children += it }
         }
         return view
     }
+
+    private fun collectGradleEditorLocationsFromDocument(file: VirtualFile): Pair<String, List<GradleEditorLocation>>? {
+        return readAction {
+            val document = FileDocumentManager.getInstance().getDocument(file) ?: return@readAction null
+            val text = document.text
+            text to collectGradleEditorLocationsWithPsi(file, text)
+        }
+    }
+
+    private fun collectGradleEditorLocationsWithPsi(file: VirtualFile, text: String): List<GradleEditorLocation> {
+        val psiFile = PsiManager.getInstance(project).findFile(file) ?: return emptyList()
+        val catalogs = loadVersionCatalogSources(file).mapValues { (_, source) -> parseVersionCatalog(source.text) }
+        val result = mutableListOf<GradleEditorLocation>()
+        fun visit(element: PsiElement) {
+            collectGradleStringLocationFromPsiElement(element, text)?.let(result::add)
+            collectGradlePluginVersionFromPsiElement(element, text)?.let(result::add)
+            collectGradleCatalogAccessorFromPsiElement(element, text, catalogs)?.forEach(result::add)
+            element.children.forEach(::visit)
+        }
+        visit(psiFile)
+        return result.distinctBy { "${it.group}:${it.name}:${it.version}:${it.scope}:${it.displayRange.startOffset}:${it.displayRange.endOffset}" }
+    }
+
+    private fun collectGradleStringLocationFromPsiElement(element: PsiElement, text: String): GradleEditorLocation? {
+        val raw = element.text
+        if (raw.length < 5 || !raw.isQuotedLiteral()) {
+            return null
+        }
+        val value = raw.substring(1, raw.length - 1)
+        if ('$' in value) {
+            return null
+        }
+        val first = value.indexOf(':')
+        val second = value.indexOf(':', first + 1)
+        if (first <= 0 || second <= first + 1 || second >= value.lastIndex) {
+            return null
+        }
+        val group = value.substring(0, first).trim()
+        val name = value.substring(first + 1, second).trim()
+        val version = value.substring(second + 1).trim()
+        if (group.isBlank() || name.isBlank() || version.isBlank()) {
+            return null
+        }
+        val scope = findGradleScopeByPsi(element, GRADLE_DEPENDENCY_SCOPES) ?: return null
+        val inspectionRange = TextRangeMarker(element.textRange.startOffset, element.textRange.endOffset)
+        val valueStart = element.textRange.startOffset + 1
+        val versionStart = valueStart + second + 1
+        val versionRange = TextRangeMarker(versionStart, versionStart + version.length)
+        return GradleEditorLocation(
+            group = group,
+            name = name,
+            version = version,
+            scope = scope,
+            declaredVersion = version,
+            declarationText = text.substring(inspectionRange.startOffset, inspectionRange.endOffset),
+            versionRange = versionRange,
+            displayRange = versionRange,
+            inspectionRange = inspectionRange,
+        )
+    }
+
+    private fun collectGradlePluginVersionFromPsiElement(element: PsiElement, text: String): GradleEditorLocation? {
+        val raw = element.text
+        if (raw.length < 3 || !raw.isQuotedLiteral()) {
+            return null
+        }
+        val pluginScope = findGradleScopeByPsi(element, setOf("plugins", "pluginManagement")) ?: return null
+        val blockScope = if (pluginScope == "pluginManagement") "pluginManagement" else "plugin"
+        val parentText = element.parent?.text ?: return null
+        val pluginId = when {
+            "id(" in parentText -> extractQuotedArgAfter(parentText, "id(")
+            "kotlin(" in parentText -> extractQuotedArgAfter(parentText, "kotlin(")?.let(::kotlinPluginId)
+            else -> null
+        } ?: return null
+        if (!parentText.contains("version")) {
+            return null
+        }
+        val version = raw.substring(1, raw.length - 1).trim()
+        if (version.isBlank() || '$' in version) {
+            return null
+        }
+        val inspectionRange = TextRangeMarker(element.textRange.startOffset, element.textRange.endOffset)
+        val versionRange = TextRangeMarker(element.textRange.startOffset + 1, element.textRange.endOffset - 1)
+        return GradleEditorLocation(
+            group = pluginId,
+            name = gradlePluginMarkerArtifact(pluginId),
+            version = version,
+            scope = blockScope,
+            declaredVersion = version,
+            declarationText = text.substring(inspectionRange.startOffset, inspectionRange.endOffset),
+            versionRange = versionRange,
+            displayRange = inspectionRange,
+            inspectionRange = inspectionRange,
+        )
+    }
+
+    private fun collectGradleCatalogAccessorFromPsiElement(
+        element: PsiElement,
+        text: String,
+        catalogs: Map<String, GradleVersionCatalog>,
+    ): List<GradleEditorLocation>? {
+        val accessor = element.text.trim().takeIf { it.isNotBlank() } ?: return null
+        val catalogAccessor = gradleCatalogAccessor(accessor) ?: return null
+        val catalog = catalogs[catalogAccessor.catalogName] ?: return null
+        val inspectionRange = TextRangeMarker(element.textRange.startOffset, element.textRange.endOffset)
+        val dependencyScope = findGradleScopeByPsi(element, GRADLE_DEPENDENCY_SCOPES)
+        val pluginScope = findGradleScopeByPsi(element, setOf("plugins", "pluginManagement"))
+
+        if (catalogAccessor.alias.startsWith("plugins.")) {
+            val alias = catalogAccessor.alias.removePrefix("plugins.")
+            val plugin = catalog.plugins[alias] ?: return null
+            val version = plugin.version ?: plugin.versionRef?.let(catalog.versions::get) ?: return null
+            val scope = if (pluginScope == "pluginManagement") "pluginManagement" else "plugin"
+            return listOf(
+                GradleEditorLocation(
+                    group = plugin.id,
+                    name = gradlePluginMarkerArtifact(plugin.id),
+                    version = version,
+                    scope = scope,
+                    declaredVersion = accessor,
+                    declarationText = text.substring(inspectionRange.startOffset, inspectionRange.endOffset),
+                    versionRange = inspectionRange,
+                    displayRange = inspectionRange,
+                    inspectionRange = inspectionRange,
+                ),
+            )
+        }
+
+        val scope = dependencyScope ?: return null
+        if (catalogAccessor.alias.startsWith("bundles.")) {
+            val bundleAlias = catalogAccessor.alias.removePrefix("bundles.")
+            val libraries = catalog.bundles[bundleAlias].orEmpty()
+            return libraries.mapNotNull { libraryAlias ->
+                val library = catalog.libraries[libraryAlias] ?: return@mapNotNull null
+                val version = library.version ?: library.versionRef?.let(catalog.versions::get) ?: return@mapNotNull null
+                GradleEditorLocation(
+                    group = library.group,
+                    name = library.name,
+                    version = version,
+                    scope = scope,
+                    declaredVersion = accessor,
+                    declarationText = text.substring(inspectionRange.startOffset, inspectionRange.endOffset),
+                    versionRange = inspectionRange,
+                    displayRange = inspectionRange,
+                    inspectionRange = inspectionRange,
+                )
+            }.takeIf { it.isNotEmpty() }
+        }
+
+        val library = catalog.libraries[catalogAccessor.alias] ?: return null
+        val version = library.version ?: library.versionRef?.let(catalog.versions::get) ?: return null
+        return listOf(
+            GradleEditorLocation(
+                group = library.group,
+                name = library.name,
+                version = version,
+                scope = scope,
+                declaredVersion = accessor,
+                declarationText = text.substring(inspectionRange.startOffset, inspectionRange.endOffset),
+                versionRange = inspectionRange,
+                displayRange = inspectionRange,
+                inspectionRange = inspectionRange,
+            ),
+        )
+    }
+
+    private fun findGradleScopeByPsi(element: PsiElement, candidates: Set<String>): String? {
+        var current: PsiElement? = element
+        while (current != null) {
+            val callName = extractCallNamePrefix(current.text)
+            if (callName != null && callName in candidates) {
+                return callName
+            }
+            current = current.parent
+        }
+        return null
+    }
+
+    private fun extractCallNamePrefix(text: String): String? {
+        val paren = text.indexOf('(')
+        if (paren <= 0) {
+            return null
+        }
+        var i = paren - 1
+        while (i >= 0 && (text[i].isLetterOrDigit() || text[i] == '_')) {
+            i--
+        }
+        val name = text.substring(i + 1, paren).trim()
+        return name.takeIf { it.isNotBlank() }
+    }
+
+    private fun extractQuotedArgAfter(text: String, prefix: String): String? {
+        val startIndex = text.indexOf(prefix)
+        if (startIndex < 0) {
+            return null
+        }
+        val quoteStart = text.indexOfAny(charArrayOf('"', '\''), startIndex + prefix.length)
+        if (quoteStart < 0) {
+            return null
+        }
+        val quote = text[quoteStart]
+        val quoteEnd = text.indexOf(quote, quoteStart + 1)
+        if (quoteEnd <= quoteStart + 1) {
+            return null
+        }
+        return text.substring(quoteStart + 1, quoteEnd).trim().takeIf { it.isNotBlank() }
+    }
+
+    private fun String.isQuotedLiteral(): Boolean =
+        (startsWith('"') && endsWith('"')) || (startsWith('\'') && endsWith('\''))
 
     private fun buildSyntheticGradleNode(
         ownerFile: VirtualFile,
@@ -736,25 +924,61 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
         )
     }
 
-    private fun buildReferencePlaceholderNode(
-        ownerFile: VirtualFile,
-        ownerProjectName: String,
-        scope: String,
-        parentPath: List<String>,
-        referenceId: Long,
-    ): MavenDependencyNodeView {
-        return MavenDependencyNodeView(
-            ownerProjectName = ownerProjectName,
-            ownerProjectFile = ownerFile,
-            groupId = "",
-            artifactId = "*",
-            version = "",
+    private fun ArtifactDependencyNode.toDependencyCoordinate(ownerFile: VirtualFile, scope: String): DependencyCoordinate {
+        val declaration = if (group.isBlank()) "$module:$version" else "$group:$module:$version"
+        val range = TextRangeMarker(0, 0)
+        return DependencyCoordinate(
+            ecosystem = Ecosystem.GRADLE,
+            group = group.takeIf { it.isNotBlank() },
+            name = module,
+            version = version,
+            declaredVersion = version.takeIf { it.isNotBlank() },
             scope = scope,
-            packaging = null,
-            path = parentPath + "*:$referenceId",
-            sourceDependency = null,
+            file = ownerFile,
+            declarationText = declaration,
+            lineNumber = 1,
+            versionRange = range,
+            displayRange = range,
+            inspectionRange = range,
         )
     }
+
+    private fun declaredPluginDependencies(file: VirtualFile): List<DependencyCoordinate> {
+        val (text, locations) = collectGradleEditorLocationsFromDocument(file) ?: return emptyList()
+        return locations
+            .filter { it.scope in GRADLE_PLUGIN_SCOPES }
+            .map { it.toDependencyCoordinate(file, text) }
+            .distinctBy { "${it.scope}:${it.group}:${it.name}:${it.version}:${it.displayRange.startOffset}" }
+    }
+
+    private fun gradlePluginMarkerArtifact(pluginId: String): String = "$pluginId.gradle.plugin"
+
+    private fun kotlinPluginId(notation: String): String? {
+        val value = notation.trim().takeIf { it.isNotEmpty() } ?: return null
+        return "org.jetbrains.kotlin.$value"
+    }
+
+    private fun GradleEditorLocation.toDependencyCoordinate(file: VirtualFile, text: String): DependencyCoordinate {
+        return DependencyCoordinate(
+            ecosystem = Ecosystem.GRADLE,
+            group = group,
+            name = name,
+            version = version,
+            declaredVersion = declaredVersion,
+            scope = scope,
+            file = file,
+            declarationText = declarationText,
+            lineNumber = text.take(displayRange.startOffset).count { it == '\n' } + 1,
+            versionRange = versionRange,
+            displayRange = displayRange,
+            inspectionRange = inspectionRange,
+        )
+    }
+
+    private fun GradleEditorLocation.pathSegment(): String = "$group:$name"
+
+    private fun isLocated(dependency: DependencyCoordinate): Boolean =
+        dependency.displayRange.startOffset != 0 || dependency.displayRange.endOffset != 0
 
     private fun flattenResolvedNodes(root: MavenDependencyNodeView): List<MavenDependencyNodeView> {
         val result = mutableListOf<MavenDependencyNodeView>()
@@ -770,51 +994,12 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
         return result
     }
 
-    private fun dependencyIdentity(group: String?, name: String, version: String): String {
-        return "${group.orEmpty()}:$name:$version"
-    }
-
-    private fun dependencyKey(group: String?, name: String): String {
-        return "${group.orEmpty()}:$name"
-    }
-
-    private fun directDependencyKey(
-        node: MavenDependencyNodeView,
-        directDependenciesByIdentity: Map<String, DependencyCoordinate>,
-        directDependenciesByKey: Map<String, DependencyCoordinate>,
-    ): String? {
-        val identity = dependencyIdentity(node.groupId, node.artifactId, node.version)
-        if (directDependenciesByIdentity.containsKey(identity)) {
-            return dependencyKey(node.groupId, node.artifactId)
-        }
-        val key = dependencyKey(node.groupId, node.artifactId)
-        return if (directDependenciesByKey.containsKey(key)) key else null
-    }
-
-    private fun mergeInto(targetChildren: MutableList<MavenDependencyNodeView>, source: MavenDependencyNodeView) {
-        val existing = targetChildren.firstOrNull { sameDependencyTreeNode(it, source) }
-        if (existing == null) {
-            targetChildren += cloneDependencyTreeNode(source)
+    private fun logGradleTreeDiagnostics(file: VirtualFile, root: MavenDependencyNodeView) {
+        val nodes = flattenResolvedNodes(root)
+        if (nodes.isEmpty()) {
+            thisLogger().info("DependencyHelper Gradle tree diag: file=${file.path}, nodes=0")
             return
         }
-        source.children.forEach { child ->
-            mergeInto(existing.children, child)
-        }
-    }
-
-    private fun cloneDependencyTreeNode(node: MavenDependencyNodeView): MavenDependencyNodeView {
-        return node.copy(
-            children = node.children
-                .take(MAX_GRADLE_CHILDREN_PER_NODE)
-                .mapTo(mutableListOf()) { child -> cloneDependencyTreeNode(child) },
-        )
-    }
-
-    private fun sameDependencyTreeNode(left: MavenDependencyNodeView, right: MavenDependencyNodeView): Boolean {
-        return left.groupId == right.groupId &&
-            left.artifactId == right.artifactId &&
-            left.version == right.version &&
-            left.scope == right.scope
     }
 
     private fun resolveCatalogTarget(file: VirtualFile, dependency: DependencyCoordinate): GradleCatalogUpgradeTarget? {
@@ -884,128 +1069,47 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
         return if (file.isDirectory) file else file.parent
     }
 
-    private fun findGradleAnalyzerContext(projectPath: String?): GradleAnalyzerContext? {
-        val disposable = Disposer.newDisposable("dependency-helper-gradle-analyzer")
-        val contributor = runCatching {
-            val extensionDisposable = DependencyAnalyzerExtension.createExtensionDisposable(GradleConstants.SYSTEM_ID, disposable)
-            DependencyAnalyzerExtension.getExtension(GradleConstants.SYSTEM_ID)
-                .createContributor(project, extensionDisposable)
-        }.getOrElse {
-            Disposer.dispose(disposable)
-            return null
-        }
-        val externalProjects = contributor.getProjects()
-        logGradleAnalyzerProjects(projectPath, externalProjects)
-        val selectedProject = externalProjects
-            .filter { externalProject ->
-                val module = externalProject.module
-                val externalProjectPath = ExternalSystemApiUtil.getExternalProjectPath(module)
-                val rootProjectPath = ExternalSystemApiUtil.getExternalRootProjectPath(module)
-                projectPath == null || externalProjectPath == projectPath || rootProjectPath == projectPath
+    private fun findGradleDependencyGraphContext(projectPath: String?): GradleDependencyGraphContext? {
+        val projectNode = projectPath
+            ?.let { ExternalSystemApiUtil.findProjectNode(project, GradleConstants.SYSTEM_ID, it) }
+            ?: return null
+        val dependencyGraphNode = ExternalSystemApiUtil.find(projectNode, ProjectKeys.DEPENDENCIES_GRAPH)
+            ?: findProjectDependenciesDataNode(projectNode)
+            ?: run {
+                return null
             }
-            .sortedByDescending { ExternalSystemApiUtil.getExternalModuleType(it.module)?.contains("sourceSet", ignoreCase = true) != true }
-            .firstOrNull()
-        if (selectedProject == null) {
-            Disposer.dispose(disposable)
-            return null
-        }
-        return GradleAnalyzerContext(disposable, contributor, selectedProject)
+        return GradleDependencyGraphContext(dependencyGraphNode.data)
     }
 
-    private fun logGradleAnalyzerProjects(projectPath: String?, externalProjects: List<DependencyAnalyzerProject>) {
-        val modules = ModuleManager.getInstance(project).modules
-        val gradleModules = modules.filter { ExternalSystemApiUtil.isExternalSystemAwareModule(GradleConstants.SYSTEM_ID.id, it) }
-        thisLogger().info(
-            "DependencyHelper Gradle module scan: projectPath=$projectPath, analyzerProjects=" +
-                externalProjects.joinToString { externalProject ->
-                    val module = externalProject.module
-                    val externalProjectPath = ExternalSystemApiUtil.getExternalProjectPath(module)
-                    val rootProjectPath = ExternalSystemApiUtil.getExternalRootProjectPath(module)
-                    val externalProjectId = ExternalSystemApiUtil.getExternalProjectId(module)
-                    val moduleType = ExternalSystemApiUtil.getExternalModuleType(module)
-                    "${module.name}[title=${externalProject.title},project=$externalProjectPath,root=$rootProjectPath,id=$externalProjectId,type=$moduleType]"
-                } + ", modules=" +
-                gradleModules.joinToString { module ->
-                    val externalProjectPath = ExternalSystemApiUtil.getExternalProjectPath(module)
-                    val rootProjectPath = ExternalSystemApiUtil.getExternalRootProjectPath(module)
-                    val externalProjectId = ExternalSystemApiUtil.getExternalProjectId(module)
-                    val moduleType = ExternalSystemApiUtil.getExternalModuleType(module)
-                    "${module.name}[project=$externalProjectPath,root=$rootProjectPath,id=$externalProjectId,type=$moduleType]"
-                },
-        )
-    }
-
-    private fun buildAnalyzerDependencyNode(
-        ownerFile: VirtualFile,
-        ownerProjectName: String,
-        dependency: DependencyAnalyzerDependency,
-        parentPath: List<String>,
-        childrenByParent: AnalyzerChildrenByParent,
-    ): MavenDependencyNodeView? {
-        val data = dependency.data
-        val groupId: String
-        val artifactId: String
-        val version: String
-        when (data) {
-            is DependencyAnalyzerDependency.Data.Artifact -> {
-                groupId = data.groupId
-                artifactId = data.artifactId
-                version = data.version
+    private fun findProjectDependenciesDataNode(projectNode: DataNode<*>): DataNode<ProjectDependencies>? {
+        val queue = ArrayDeque<DataNode<*>>()
+        queue += projectNode
+        while (queue.isNotEmpty()) {
+            val current = queue.removeFirst()
+            @Suppress("UNCHECKED_CAST")
+            if (current.data is ProjectDependencies) {
+                return current as DataNode<ProjectDependencies>
             }
-            is DependencyAnalyzerDependency.Data.Module -> {
-                groupId = ""
-                artifactId = data.name
-                version = ""
-            }
+            current.children.forEach(queue::addLast)
         }
-        val displayName = "$groupId:$artifactId:$version"
-        val node = MavenDependencyNodeView(
-            ownerProjectName = ownerProjectName,
-            ownerProjectFile = ownerFile,
-            groupId = groupId,
-            artifactId = artifactId,
-            version = version,
-            scope = dependency.scope.name,
-            packaging = null,
-            path = parentPath + displayName,
-            sourceDependency = null,
-        )
-        childrenByParent.childrenOf(dependency).forEach { child ->
-            buildAnalyzerDependencyNode(ownerFile, ownerProjectName, child, node.path, childrenByParent)
-                ?.let { node.children += it }
-        }
-        return node
+        return null
     }
 
-    private fun List<DependencyAnalyzerDependency>.childrenByParent(): AnalyzerChildrenByParent {
-        val result = AnalyzerChildrenByParent()
-        forEach { dependency ->
-            val parent = dependency.parent ?: return@forEach
-            result.add(parent, dependency)
-        }
-        return result
-    }
+    private data class GradleDependencyGraphContext(
+        val dependencies: ProjectDependencies,
+    )
 
-    private data class GradleAnalyzerContext(
-        private val disposable: Disposable,
-        val contributor: DependencyAnalyzerContributor,
-        val externalProject: DependencyAnalyzerProject,
-    ) : AutoCloseable {
-        override fun close() {
-            Disposer.dispose(disposable)
-        }
-    }
-
-    private class AnalyzerChildrenByParent {
-        private val children = IdentityHashMap<DependencyAnalyzerDependency, MutableList<DependencyAnalyzerDependency>>()
-
-        fun add(parent: DependencyAnalyzerDependency, child: DependencyAnalyzerDependency) {
-            children.getOrPut(parent) { mutableListOf() } += child
-        }
-
-        fun childrenOf(parent: DependencyAnalyzerDependency): List<DependencyAnalyzerDependency> =
-            children[parent].orEmpty()
-    }
+    private data class GradleEditorLocation(
+        val group: String,
+        val name: String,
+        val version: String,
+        val scope: String?,
+        val declaredVersion: String,
+        val declarationText: String,
+        val versionRange: TextRangeMarker,
+        val displayRange: TextRangeMarker,
+        val inspectionRange: TextRangeMarker,
+    )
 
     private fun resolveAnalysisFile(file: VirtualFile): VirtualFile {
         if (file.name !in DependencyFileKind.GRADLE_SETTINGS.fileNames) {
@@ -1019,9 +1123,25 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
         val GRADLE_SYSTEM_ID = ProjectSystemId("GRADLE")
         val GRADLE_FILE_NAMES = DependencyFileKind.GRADLE_BUILD.fileNames + DependencyFileKind.GRADLE_SETTINGS.fileNames
         val GRADLE_SETTINGS_FILE_NAMES = DependencyFileKind.GRADLE_SETTINGS.fileNames
-        val GRADLE_CATALOG_ACCESSOR_PATTERN = Regex("""(?:\w+\(\s*)?([A-Za-z][A-Za-z0-9_]*\.[A-Za-z0-9_.-]+)""")
+        val GRADLE_PLUGIN_SCOPES = setOf("plugin", "pluginManagement")
+        val GRADLE_DEPENDENCY_SCOPES = setOf(
+            "api",
+            "implementation",
+            "compileOnly",
+            "compileOnlyApi",
+            "runtimeOnly",
+            "testApi",
+            "testImplementation",
+            "testCompileOnly",
+            "testRuntimeOnly",
+            "androidTestApi",
+            "androidTestImplementation",
+            "androidTestCompileOnly",
+            "androidTestRuntimeOnly",
+            "kapt",
+            "ksp",
+        )
         const val MAX_GRADLE_TREE_DEPTH = 4
-        const val MAX_GRADLE_CHILDREN_PER_NODE = 50
     }
 }
 
@@ -1033,7 +1153,7 @@ internal fun enrichGradleDependencies(
 ): List<DependencyCoordinate> {
     val context = parseGradleVersionContext(buildText, gradlePropertiesText, versionCatalogs)
     return dependencies.flatMap { dependency ->
-        if (dependency.ecosystem != org.knifefish.dependency.helper.model.Ecosystem.GRADLE) {
+        if (dependency.ecosystem != Ecosystem.GRADLE) {
             listOf(dependency)
         } else {
             val resolved = resolveGradleDependencies(context, dependency)
@@ -1480,22 +1600,45 @@ private fun splitTomlTopLevel(text: String): List<String> {
     return result
 }
 
-private fun parseSettingsCatalogMappings(settingsFile: VirtualFile, settingsText: String): Map<String, String> {
-    val baseDir = Paths.get(settingsFile.parent.path)
+internal fun parseSettingsCatalogMappings(baseDir: Path, settingsText: String): Map<String, String> {
     val result = linkedMapOf<String, String>()
     val lines = settingsText.lines()
+    var inVersionCatalogs = false
+    var versionCatalogDepth = 0
     lines.forEachIndexed { index, raw ->
         val line = raw.trim()
+        if (!inVersionCatalogs) {
+            if (line.startsWith("versionCatalogs")) {
+                inVersionCatalogs = true
+                versionCatalogDepth = line.count { it == '{' } - line.count { it == '}' }
+            }
+            return@forEachIndexed
+        }
+        versionCatalogDepth += line.count { it == '{' } - line.count { it == '}' }
+        if (versionCatalogDepth <= 0 && !(line.startsWith("create(") || line.startsWith("maybeCreate("))) {
+            inVersionCatalogs = false
+            versionCatalogDepth = 0
+            return@forEachIndexed
+        }
         if (!(line.startsWith("create(") || line.startsWith("maybeCreate("))) return@forEachIndexed
         val name = betweenFirstQuotes(line) ?: return@forEachIndexed
-        val fromPart = line.substringAfter(".from(", "").substringBeforeLast(")", "")
+        val fromPart = when {
+            ".from(" in line -> line.substringAfter(".from(", "").substringBeforeLast(")", "")
+            "from(" in line -> line.substringAfter("from(", "").substringBeforeLast(")", "")
+            else -> ""
+        }
         if (fromPart.isNotBlank()) {
             parseCatalogFromClause(fromPart, baseDir)?.let { result[name] = it }
             return@forEachIndexed
         }
         var j = index + 1
-        while (j < lines.size && !lines[j].contains("}")) {
+        var createDepth = line.count { it == '{' } - line.count { it == '}' }
+        if (createDepth <= 0) {
+            return@forEachIndexed
+        }
+        while (j < lines.size && (createDepth > 0 || !lines[j].trim().startsWith("create("))) {
             val candidate = lines[j].trim()
+            createDepth += candidate.count { it == '{' } - candidate.count { it == '}' }
             if (candidate.startsWith("from(")) {
                 val arg = candidate.substringAfter("from(", "").substringBeforeLast(")", "")
                 parseCatalogFromClause(arg, baseDir)?.let { result[name] = it }

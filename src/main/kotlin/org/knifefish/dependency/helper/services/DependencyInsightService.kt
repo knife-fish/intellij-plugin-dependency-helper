@@ -123,7 +123,8 @@ class DependencyInsightService(private val project: Project) {
         val file = FileDocumentManager.getInstance().getFile(editor.document) ?: return
         ApplicationManager.getApplication().executeOnPooledThread {
             val dependencies = readAction {
-                scanFileInternal(file, includeMavenPlugins = true)
+                withEditorLocations(file, scanFileInternal(file, includeMavenPlugins = true))
+                    .filter(::isEditorLocatable)
             }
             if (dependencies.isEmpty()) {
                 ApplicationManager.getApplication().invokeLater {
@@ -143,9 +144,11 @@ class DependencyInsightService(private val project: Project) {
             }
             val managedOptions = lookups
                 .filter { result -> result.dependency.usesManagedVersion && result.dependency.ecosystem == Ecosystem.MAVEN }
-                .associate { result ->
-                    result.dependency to project.service<MavenSupport>().resolveManagedUpgradeOptions(result.dependency)
+                .mapNotNull { result ->
+                    val support = project.getService(MavenSupport::class.java) ?: return@mapNotNull null
+                    result.dependency to support.resolveManagedUpgradeOptions(result.dependency)
                 }
+                .toMap()
             ApplicationManager.getApplication().invokeLater {
                 DependencyInlayManager.render(editor, lookups, latestRule, managedOptions)
                 DaemonCodeAnalyzer.getInstance(project).settingsChanged()
@@ -223,18 +226,32 @@ class DependencyInsightService(private val project: Project) {
 
     fun dependencyAt(file: VirtualFile, offset: Int): DependencyCoordinate? =
         readAction {
-            scanFileInternal(file, includeMavenPlugins = true).firstOrNull { marker ->
+            withEditorLocations(file, scanFileInternal(file, includeMavenPlugins = true)).filter(::isEditorLocatable).firstOrNull { marker ->
                 marker.versionRange?.let { offset in it.startOffset..it.endOffset } == true ||
                     offset in marker.inspectionRange.startOffset..marker.inspectionRange.endOffset
             }
         }
+
+    private fun withEditorLocations(file: VirtualFile, dependencies: List<DependencyCoordinate>): List<DependencyCoordinate> {
+        if (!DependencyFiles.isGradle(file) || dependencies.isEmpty()) {
+            return dependencies
+        }
+        return project.getService(GradleSupport::class.java)?.attachEditorLocations(file, dependencies) ?: dependencies
+    }
+
+    private fun isEditorLocatable(dependency: DependencyCoordinate): Boolean {
+        if (dependency.ecosystem != Ecosystem.GRADLE) {
+            return true
+        }
+        return dependency.displayRange.startOffset != 0 || dependency.displayRange.endOffset != 0
+    }
 
     private fun cacheKey(dependency: DependencyCoordinate, repositories: List<RepositorySpec>): String {
         return "${dependency.key}:${latestVersionPolicy.name}:${repositories.joinToString(",") { it.url }}"
     }
 
     private fun repositoriesForLookup(dependency: DependencyCoordinate, repositories: List<RepositorySpec>): List<RepositorySpec> {
-        if (dependency.ecosystem != Ecosystem.MAVEN || dependency.scope !in MAVEN_PLUGIN_SCOPES) {
+        if (dependency.scope !in PLUGIN_SCOPES || dependency.ecosystem !in setOf(Ecosystem.MAVEN, Ecosystem.GRADLE)) {
             return repositories
         }
         val pluginRepositories = repositories.mapNotNull { repository ->
@@ -242,7 +259,20 @@ class DependencyInsightService(private val project: Project) {
                 repository.copy(url = pluginUrl, supportsSearch = repository.supportsSearch || pluginUrl.supportsMavenSearch())
             }
         }
-        return pluginRepositories.ifEmpty { repositories }
+        if (pluginRepositories.isNotEmpty()) {
+            return pluginRepositories
+        }
+        if (dependency.ecosystem == Ecosystem.GRADLE) {
+            return listOf(
+                RepositorySpec(
+                    ecosystem = Ecosystem.GRADLE,
+                    url = GRADLE_PLUGIN_PORTAL_REPOSITORY,
+                    source = "Gradle Plugin Portal",
+                    supportsSearch = true,
+                ),
+            )
+        }
+        return repositories
     }
 
     private fun sameArtifact(left: DependencyCoordinate, right: DependencyCoordinate): Boolean {
@@ -257,7 +287,7 @@ class DependencyInsightService(private val project: Project) {
         newVersion: String,
     ): DeclarationReplacement? {
         val currentDependencies = readAction {
-            scanFileInternal(dependency.file, includeMavenPlugins = true)
+            withEditorLocations(dependency.file, scanFileInternal(dependency.file, includeMavenPlugins = true))
         }
         val target = currentDependencies
             .filter { candidate ->
@@ -329,10 +359,12 @@ class DependencyInsightService(private val project: Project) {
 
 fun Project.dependencyInsightService(): DependencyInsightService = service()
 
-private val MAVEN_PLUGIN_SCOPES = setOf(
+private val PLUGIN_SCOPES = setOf(
     MavenDeclarationCollector.PLUGIN_SCOPE,
     MavenDeclarationCollector.PLUGIN_MANAGEMENT_SCOPE,
 )
+
+private const val GRADLE_PLUGIN_PORTAL_REPOSITORY = "https://plugins.gradle.org/m2/"
 
 private fun String.supportsMavenSearch(): Boolean =
     contains("search.maven.org") ||

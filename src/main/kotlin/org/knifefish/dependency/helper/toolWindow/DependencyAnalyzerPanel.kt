@@ -258,29 +258,17 @@ class DependencyAnalyzerPanel(
         if (refreshExternalModel) {
             saveDocument(effectiveTargetFile)
         }
-        thisLogger().info(
-            "DependencyHelper reloadDependencies: currentFile=${currentFile?.path}, targetFile=${targetFile?.path}, " +
-                "effectiveTargetFile=${effectiveTargetFile?.path}, " +
-                "mavenSupport=${mavenSupport?.javaClass?.simpleName ?: "null"}, " +
-                "gradleSupport=${gradleSupport?.javaClass?.simpleName ?: "null"}",
-        )
         if (refreshExternalModel && effectiveTargetFile?.let(DependencyFiles::isMavenPom) == true && mavenSupport != null) {
-            thisLogger().info("DependencyHelper reloadDependencies branch: mavenRefresh file=${effectiveTargetFile.path}")
             mavenSupport.refreshMavenProject(effectiveTargetFile) {
                 reloadDependencies(refreshExternalModel = false)
             }
             return
         }
         if (effectiveTargetFile != null && DependencyFiles.isGradle(effectiveTargetFile)) {
-            thisLogger().info("DependencyHelper reloadDependencies branch: gradleAnalyze-async file=${effectiveTargetFile.path}")
             ApplicationManager.getApplication().executeOnPooledThread {
                 val resolvedRoots = gradleSupport?.analyze(effectiveTargetFile).orEmpty()
                     .ifEmpty { buildFileRoots(effectiveTargetFile) }
                 ApplicationManager.getApplication().invokeLater {
-                    thisLogger().info(
-                        "DependencyHelper reloadDependencies gradleAnalyze-async result: file=${effectiveTargetFile.path}, roots=${resolvedRoots.size}, " +
-                            "nodes=${resolvedRoots.joinToString { "${it.artifactId}:${it.children.size}" }}",
-                    )
                     applyRoots(resolvedRoots)
                 }
             }
@@ -290,17 +278,14 @@ class DependencyAnalyzerPanel(
             val resolvedRoots = when {
                 effectiveTargetFile?.let(DependencyFiles::isMavenPom) == true && mavenSupport != null -> {
                     val pomTarget = requireNotNull(effectiveTargetFile)
-                    thisLogger().info("DependencyHelper reloadDependencies branch: mavenAnalyze file=${pomTarget.path}")
                     val analyzedRoots = mavenSupport.analyze()
                     analyzedRoots.filter { it.ownerProjectFile.path == pomTarget.path }
                         .ifEmpty { buildFileRoots(pomTarget) }
                 }
                 effectiveTargetFile != null -> {
-                    thisLogger().info("DependencyHelper reloadDependencies branch: fileRoots file=${effectiveTargetFile.path}")
                     buildFileRoots(effectiveTargetFile)
                 }
                 else -> {
-                    thisLogger().info("DependencyHelper reloadDependencies branch: projectMavenAnalyze")
                     mavenSupport?.analyze().orEmpty()
                 }
             }
@@ -330,10 +315,6 @@ class DependencyAnalyzerPanel(
     }
 
     private fun applyRoots(newRoots: List<MavenDependencyNodeView>) {
-        thisLogger().info(
-            "DependencyHelper applyRoots: roots=${newRoots.size}, " +
-                "nodes=${newRoots.joinToString { "${it.artifactId}:${it.children.size}" }}",
-        )
         roots = newRoots
         artifactSizeLabelByCoordinate.clear()
         conflictKeys = flatten(roots)
@@ -351,11 +332,6 @@ class DependencyAnalyzerPanel(
         val conflictOnly = conflictOnlyCheckbox.isSelected
         val displayRoots = normalizeDisplayRoots(roots)
         val filteredRoots = displayRoots.mapNotNull { filterNode(it, filter, hideTest, conflictOnly) }
-        thisLogger().info(
-            "DependencyHelper refreshAnalysisView: roots=${roots.size}, displayRoots=${displayRoots.size}, filteredRoots=${filteredRoots.size}, " +
-                "filteredDependencyCount=${flatten(filteredRoots).count { it.path.size > 1 }}, " +
-                "treeMode=${treeModeButton.isSelected}, listMode=${listModeButton.isSelected}",
-        )
         rebuildList(filteredRoots)
         rebuildTree(filteredRoots)
         val dependencyCount = flatten(filteredRoots).count { it.path.size > 1 }
@@ -402,16 +378,19 @@ class DependencyAnalyzerPanel(
 
     private fun rebuildList(filteredRoots: List<MavenDependencyNodeView>) {
         listModel.clear()
-        val items = flatten(filteredRoots).filter { it.path.size > 1 }
+        val flattenedItems = flatten(filteredRoots).filter { it.path.size > 1 }
+        val items = if (currentDependencyTargetFile()?.let(DependencyFiles::isGradle) == true) {
+            flattenedItems.distinctBy { "${it.key}:${it.version}:${it.scope}" }
+        } else {
+            flattenedItems
+        }
         items.forEach(listModel::addElement)
-        thisLogger().info("DependencyHelper rebuildList: items=${items.size}")
     }
 
     private fun rebuildTree(filteredRoots: List<MavenDependencyNodeView>) {
         val root = DefaultMutableTreeNode("root")
         filteredRoots.forEach { root.add(asTreeNode(it)) }
         dependencyTree.model = DefaultTreeModel(root)
-        thisLogger().info("DependencyHelper rebuildTree: topLevel=${root.childCount}")
         if (treeModeButton.isSelected && shouldAutoExpandTree()) {
             expandAll(dependencyTree)
         }
@@ -780,10 +759,6 @@ class DependencyAnalyzerPanel(
 
     private fun buildFileRoots(file: com.intellij.openapi.vfs.VirtualFile): List<MavenDependencyNodeView> {
         val dependencies = service.scanFile(file)
-        thisLogger().info(
-            "DependencyHelper buildFileRoots: file=${file.path}, dependencies=" +
-                dependencies.joinToString { "${it.declaredVersion ?: it.displayName}=>${it.displayName}:${it.version.ifBlank { "unknown" }}" },
-        )
         if (dependencies.isEmpty()) {
             return emptyList()
         }

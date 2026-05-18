@@ -489,11 +489,6 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
         return pomRecursivelyManagesDependency(resolvePomReference(bom), dependency, mutableSetOf())
     }
 
-    private fun bomDirectlyManagesDependency(bom: PomReference, dependency: DependencyCoordinate): Boolean {
-        val xmlFile = resolvePomReference(bom) ?: return false
-        return pomDirectlyManagesDependency(xmlFile, dependency)
-    }
-
     private fun workspaceParentDelegatesToMoreDirectReference(
         parent: PomReference,
         dependency: DependencyCoordinate,

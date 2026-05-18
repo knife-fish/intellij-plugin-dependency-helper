@@ -6,7 +6,6 @@ import com.intellij.openapi.actionSystem.*
 import com.intellij.openapi.actionSystem.ex.ActionUtil
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.invokeLater
-import com.intellij.openapi.components.service
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.editor.LogicalPosition
 import com.intellij.openapi.util.Key
@@ -212,7 +211,7 @@ class DependencyDocumentationProvider : DocumentationProviderEx() {
             if (!dependency.usesManagedVersion || dependency.ecosystem.name != "MAVEN") {
                 return emptyList()
             }
-            val mavenSupport = project.service<MavenSupport>()
+            val mavenSupport = project.getService(MavenSupport::class.java) ?: return emptyList()
             return if (cachedOnly) {
                 mavenSupport.resolveManagedUpgradeOptionsIfCached(dependency)
             } else {
@@ -244,8 +243,8 @@ class DependencyDocumentationProvider : DocumentationProviderEx() {
                 .ifBlank { "current" }
             val option = lookup.managedOptions.firstOrNull { it.target.id == targetId }
             if (option != null) {
-                project.service<MavenSupport>()
-                    .executeManagedUpgradeTarget(option.target, option.latestVersion)
+                project.getService(MavenSupport::class.java)
+                    ?.executeManagedUpgradeTarget(option.target, option.latestVersion)
             } else {
                 val latest = lookup.versionInfo.latestStable ?: return
                 project.dependencyInsightService().upgradeDependency(lookup.dependency, latest)

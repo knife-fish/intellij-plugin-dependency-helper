@@ -13,6 +13,8 @@ interface GradleSupport {
 
     fun enrichDependencies(file: VirtualFile, dependencies: List<DependencyCoordinate>): List<DependencyCoordinate>
 
+    fun attachEditorLocations(file: VirtualFile, dependencies: List<DependencyCoordinate>): List<DependencyCoordinate> = dependencies
+
     fun upgradeDependency(dependency: DependencyCoordinate, newVersion: String): Boolean
 
     fun refreshGradleProject(file: VirtualFile, afterRefresh: (() -> Unit)? = null)
