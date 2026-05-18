@@ -7,6 +7,7 @@ import com.intellij.openapi.util.Key
 import com.intellij.ui.JBColor
 import org.knifefish.dependency.helper.DependencyHelperBundle
 import org.knifefish.dependency.helper.documentation.DependencyDocumentationProvider
+import org.knifefish.dependency.helper.model.DependencyCoordinate
 import org.knifefish.dependency.helper.model.DependencyLookupResult
 import java.awt.Font
 import java.awt.Graphics
@@ -16,9 +17,14 @@ object DependencyInlayManager {
 
     private val inlayKey = Key.create<MutableList<Inlay<*>>>("dependency.helper.inlays")
 
-    fun render(editor: Editor, results: List<DependencyLookupResult>, latestRule: String) {
+    fun render(
+        editor: Editor,
+        results: List<DependencyLookupResult>,
+        latestRule: String,
+        managedOptions: Map<DependencyCoordinate, List<ManagedUpgradeOption>> = emptyMap(),
+    ) {
         clear(editor)
-        DependencyDocumentationProvider.setEditorLookups(editor, results, latestRule)
+        DependencyDocumentationProvider.setEditorLookups(editor, results, latestRule, managedOptions)
         val inlays = mutableListOf<Inlay<*>>()
         results.forEach { result ->
             val presentation = buildPresentation(result)

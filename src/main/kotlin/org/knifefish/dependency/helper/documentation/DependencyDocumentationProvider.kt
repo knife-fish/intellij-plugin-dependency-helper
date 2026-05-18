@@ -79,9 +79,8 @@ class DependencyDocumentationProvider : DocumentationProviderEx() {
         }
         lookup.upgradeTriggered = true
         val project = context.project
-        val latest = lookup.versionInfo.latestStable ?: return context
         invokeLater {
-            executeUpgrade(project, lookup, normalizedLink, latest)
+            executeUpgrade(project, lookup, normalizedLink)
         }
         return context
     }
@@ -93,8 +92,16 @@ class DependencyDocumentationProvider : DocumentationProviderEx() {
         internal val FILE_LOOKUP_KEY = Key.create<DocumentationLookupContext>("dependency.helper.documentation.file.lookup")
         internal val FORCE_LOOKUP_KEY = Key.create<Boolean>("dependency.helper.documentation.file.force.lookup")
 
-        fun setEditorLookups(editor: Editor, results: List<DependencyLookupResult>, latestRule: String) {
-            editor.putUserData(EDITOR_LOOKUPS_KEY, results.map { EditorLookupResult(it, latestRule) })
+        fun setEditorLookups(
+            editor: Editor,
+            results: List<DependencyLookupResult>,
+            latestRule: String,
+            managedOptions: Map<DependencyCoordinate, List<ManagedUpgradeOption>> = emptyMap(),
+        ) {
+            editor.putUserData(
+                EDITOR_LOOKUPS_KEY,
+                results.map { EditorLookupResult(it, latestRule, managedOptions[it.dependency].orEmpty()) },
+            )
         }
 
         fun clearEditorLookups(editor: Editor) {
@@ -105,9 +112,10 @@ class DependencyDocumentationProvider : DocumentationProviderEx() {
         fun showQuickDoc(editor: Editor, result: DependencyLookupResult, latestRule: String, point: Point? = null): Boolean {
             val project = editor.project ?: return false
             ApplicationManager.getApplication().executeOnPooledThread {
+                val managedOptions = resolveManagedOptionsForDocumentation(project, result.dependency, cachedOnly = false)
                 val context = readAction {
                     val psiFile = PsiDocumentManager.getInstance(project).getPsiFile(editor.document) ?: return@readAction null
-                    buildLookupContext(project, psiFile, result, latestRule)
+                    buildLookupContext(project, psiFile, result, latestRule, managedOptions)
                 } ?: return@executeOnPooledThread
 
                 invokeLater {
@@ -144,7 +152,7 @@ class DependencyDocumentationProvider : DocumentationProviderEx() {
                 .firstOrNull { it.result.dependency.contains(targetOffset) }
                 ?: buildCachedLookupResult(project, psiFile, targetOffset)
                 ?: return null
-            return buildLookupContext(project, psiFile, result.result, result.latestRule)
+            return buildLookupContext(project, psiFile, result.result, result.latestRule, result.managedOptions)
         }
 
         private fun buildCachedLookupResult(
@@ -166,6 +174,7 @@ class DependencyDocumentationProvider : DocumentationProviderEx() {
             return EditorLookupResult(
                 result = DependencyLookupResult(dependency, versionInfo),
                 latestRule = service.latestVersionPolicy().displayName,
+                managedOptions = resolveManagedOptionsForDocumentation(project, dependency, cachedOnly = true),
             )
         }
 
@@ -173,7 +182,7 @@ class DependencyDocumentationProvider : DocumentationProviderEx() {
             val psiFile = element.containingFile ?: return null
             val offset = element.textRange?.startOffset?.takeIf { it >= 0 } ?: element.textOffset.takeIf { it >= 0 } ?: return null
             val result = buildCachedLookupResult(element.project, psiFile, offset) ?: return null
-            return buildLookupContext(element.project, psiFile, result.result, result.latestRule)
+            return buildLookupContext(element.project, psiFile, result.result, result.latestRule, result.managedOptions)
         }
 
         private fun buildLookupContext(
@@ -181,16 +190,34 @@ class DependencyDocumentationProvider : DocumentationProviderEx() {
             psiFile: PsiFile,
             result: DependencyLookupResult,
             latestRule: String,
+            precomputedManagedOptions: List<ManagedUpgradeOption> = emptyList(),
         ): DocumentationLookupContext {
             val originalElement = findOriginalElement(psiFile, result.dependency) ?: psiFile
             val metadataPsi = resolveMetadataPsi(project, result.dependency)
             val managedOptions = if (result.dependency.usesManagedVersion) {
-                project.service<MavenSupport>()
-                    .resolveManagedUpgradeOptions(result.dependency)
+                precomputedManagedOptions.ifEmpty {
+                    resolveManagedOptionsForDocumentation(project, result.dependency, cachedOnly = true)
+                }
             } else {
                 emptyList()
             }
             return DocumentationLookupContext(result.dependency, result.versionInfo, latestRule, managedOptions, metadataPsi, originalElement)
+        }
+
+        private fun resolveManagedOptionsForDocumentation(
+            project: com.intellij.openapi.project.Project,
+            dependency: DependencyCoordinate,
+            cachedOnly: Boolean,
+        ): List<ManagedUpgradeOption> {
+            if (!dependency.usesManagedVersion || dependency.ecosystem.name != "MAVEN") {
+                return emptyList()
+            }
+            val mavenSupport = project.service<MavenSupport>()
+            return if (cachedOnly) {
+                mavenSupport.resolveManagedUpgradeOptionsIfCached(dependency)
+            } else {
+                mavenSupport.resolveManagedUpgradeOptions(dependency)
+            }
         }
 
         private fun anchorOffset(
@@ -211,7 +238,6 @@ class DependencyDocumentationProvider : DocumentationProviderEx() {
             project: com.intellij.openapi.project.Project,
             lookup: DocumentationLookupContext,
             normalizedLink: String,
-            latest: String,
         ) {
             val targetId = normalizedLink.substringAfter("dependency-helper-upgrade", "")
                 .removePrefix(":")
@@ -221,6 +247,7 @@ class DependencyDocumentationProvider : DocumentationProviderEx() {
                 project.service<MavenSupport>()
                     .executeManagedUpgradeTarget(option.target, option.latestVersion)
             } else {
+                val latest = lookup.versionInfo.latestStable ?: return
                 project.dependencyInsightService().upgradeDependency(lookup.dependency, latest)
             }
         }
@@ -273,6 +300,7 @@ class DependencyDocumentationProvider : DocumentationProviderEx() {
     private data class EditorLookupResult(
         val result: DependencyLookupResult,
         val latestRule: String,
+        val managedOptions: List<ManagedUpgradeOption>,
     )
 }
 

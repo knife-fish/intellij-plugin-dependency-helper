@@ -10,6 +10,48 @@ import org.knifefish.dependency.helper.model.Ecosystem
 class MavenDependencyAnalyzerManagedUpgradeTest {
 
     @Test
+    fun offersParentUpgradeForPluginManagedByParentPluginManagement() {
+        val appProject = LightVirtualFile("app-pom.xml", "<project/>")
+        val dependency = DependencyCoordinate(
+            ecosystem = Ecosystem.MAVEN,
+            group = "org.apache.maven.plugins",
+            name = "maven-compiler-plugin",
+            version = "3.12.1",
+            declaredVersion = "3.12.1",
+            scope = MavenDeclarationCollector.PLUGIN_SCOPE,
+            file = appProject,
+            declarationText = "",
+            lineNumber = 1,
+            versionRange = null,
+        )
+        val parent = PomReference("com.acme", "build-parent", "1.0.0")
+
+        val targets = collectManagedUpgradeTargets(
+            dependency = dependency,
+            descriptors = listOf(
+                ManagedProjectDescriptor(
+                    file = appProject,
+                    descriptor = ProjectDescriptor(
+                        parent = parent,
+                        importedBoms = emptyList(),
+                    ),
+                ),
+            ),
+            parentRecursivelyManages = { candidate, managed -> candidate == parent && managed.name == "maven-compiler-plugin" },
+            bomRecursivelyManages = { _, _ -> false },
+            workspaceParentDelegates = { _, _ -> false },
+        )
+
+        assertEquals(1, targets.size)
+        val target = targets.single()
+        assertEquals(ManagedUpgradeTargetKind.PARENT, target.kind)
+        assertEquals(appProject, target.file)
+        assertEquals("com.acme", target.groupId)
+        assertEquals("build-parent", target.artifactId)
+        assertEquals("1.0.0", target.currentVersion)
+    }
+
+    @Test
     fun prefersDirectWorkspaceBomOverParentWhenParentOnlyDelegates() {
         val moduleA = LightVirtualFile("moduleA-pom.xml", "<project/>")
         val moduleB = LightVirtualFile("moduleB-pom.xml", "<project/>")

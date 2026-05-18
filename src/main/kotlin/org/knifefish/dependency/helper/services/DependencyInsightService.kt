@@ -68,7 +68,8 @@ class DependencyInsightService(private val project: Project) {
         repositories: List<RepositorySpec>,
         forceRefresh: Boolean = false,
     ): VersionInfo {
-        val cacheKey = cacheKey(dependency, repositories)
+        val effectiveRepositories = repositoriesForLookup(dependency, repositories)
+        val cacheKey = cacheKey(dependency, effectiveRepositories)
         if (forceRefresh) {
             cache.remove(cacheKey)
         }
@@ -76,13 +77,13 @@ class DependencyInsightService(private val project: Project) {
         if (existing != null && !existing.isExpired()) {
             return existing.info
         }
-        val info = indexClient.findLatestVersion(dependency, repositories, latestVersionPolicy)
+        val info = indexClient.findLatestVersion(dependency, effectiveRepositories, latestVersionPolicy)
         cache[cacheKey] = CachedVersion(info)
         return info
     }
 
     fun lookupLatestVersionIfCached(dependency: DependencyCoordinate, repositories: List<RepositorySpec>): VersionInfo? {
-        return cache[cacheKey(dependency, repositories)]?.takeUnless { it.isExpired() }?.info
+        return cache[cacheKey(dependency, repositoriesForLookup(dependency, repositories))]?.takeUnless { it.isExpired() }?.info
     }
 
     fun latestVersionPolicy(): LatestVersionPolicy = latestVersionPolicy
@@ -121,7 +122,9 @@ class DependencyInsightService(private val project: Project) {
     ) {
         val file = FileDocumentManager.getInstance().getFile(editor.document) ?: return
         ApplicationManager.getApplication().executeOnPooledThread {
-            val dependencies = scanFile(file)
+            val dependencies = readAction {
+                scanFileInternal(file, includeMavenPlugins = true)
+            }
             if (dependencies.isEmpty()) {
                 ApplicationManager.getApplication().invokeLater {
                     DependencyInlayManager.clear(editor)
@@ -138,8 +141,13 @@ class DependencyInsightService(private val project: Project) {
                 )
                 DependencyLookupResult(dependency, info)
             }
+            val managedOptions = lookups
+                .filter { result -> result.dependency.usesManagedVersion && result.dependency.ecosystem == Ecosystem.MAVEN }
+                .associate { result ->
+                    result.dependency to project.service<MavenSupport>().resolveManagedUpgradeOptions(result.dependency)
+                }
             ApplicationManager.getApplication().invokeLater {
-                DependencyInlayManager.render(editor, lookups, latestRule)
+                DependencyInlayManager.render(editor, lookups, latestRule, managedOptions)
                 DaemonCodeAnalyzer.getInstance(project).settingsChanged()
             }
         }
@@ -214,13 +222,27 @@ class DependencyInsightService(private val project: Project) {
     }
 
     fun dependencyAt(file: VirtualFile, offset: Int): DependencyCoordinate? =
-        scanFile(file).firstOrNull { marker ->
-            marker.versionRange?.let { offset in it.startOffset..it.endOffset } == true ||
-                offset in marker.inspectionRange.startOffset..marker.inspectionRange.endOffset
+        readAction {
+            scanFileInternal(file, includeMavenPlugins = true).firstOrNull { marker ->
+                marker.versionRange?.let { offset in it.startOffset..it.endOffset } == true ||
+                    offset in marker.inspectionRange.startOffset..marker.inspectionRange.endOffset
+            }
         }
 
     private fun cacheKey(dependency: DependencyCoordinate, repositories: List<RepositorySpec>): String {
         return "${dependency.key}:${latestVersionPolicy.name}:${repositories.joinToString(",") { it.url }}"
+    }
+
+    private fun repositoriesForLookup(dependency: DependencyCoordinate, repositories: List<RepositorySpec>): List<RepositorySpec> {
+        if (dependency.ecosystem != Ecosystem.MAVEN || dependency.scope !in MAVEN_PLUGIN_SCOPES) {
+            return repositories
+        }
+        val pluginRepositories = repositories.mapNotNull { repository ->
+            repository.pluginUrl?.let { pluginUrl ->
+                repository.copy(url = pluginUrl, supportsSearch = repository.supportsSearch || pluginUrl.supportsMavenSearch())
+            }
+        }
+        return pluginRepositories.ifEmpty { repositories }
     }
 
     private fun sameArtifact(left: DependencyCoordinate, right: DependencyCoordinate): Boolean {
@@ -234,7 +256,9 @@ class DependencyInsightService(private val project: Project) {
         currentText: String,
         newVersion: String,
     ): DeclarationReplacement? {
-        val currentDependencies = scanFileInternal(dependency.file)
+        val currentDependencies = readAction {
+            scanFileInternal(dependency.file, includeMavenPlugins = true)
+        }
         val target = currentDependencies
             .filter { candidate ->
                 candidate.ecosystem == dependency.ecosystem &&
@@ -270,7 +294,13 @@ class DependencyInsightService(private val project: Project) {
         )
     }
 
-    private fun scanFileInternal(file: VirtualFile): List<DependencyCoordinate> {
+    private fun scanFileInternal(file: VirtualFile, includeMavenPlugins: Boolean = false): List<DependencyCoordinate> {
+        if (includeMavenPlugins && DependencyFiles.isMavenPom(file)) {
+            return externalSystems.enrich(
+                file,
+                MavenDeclarationCollector.collect(project, file, includePlugins = true),
+            )
+        }
         val scanned = externalSystems.scan(file)
         return externalSystems.enrich(file, scanned)
     }
@@ -298,6 +328,18 @@ class DependencyInsightService(private val project: Project) {
 }
 
 fun Project.dependencyInsightService(): DependencyInsightService = service()
+
+private val MAVEN_PLUGIN_SCOPES = setOf(
+    MavenDeclarationCollector.PLUGIN_SCOPE,
+    MavenDeclarationCollector.PLUGIN_MANAGEMENT_SCOPE,
+)
+
+private fun String.supportsMavenSearch(): Boolean =
+    contains("search.maven.org") ||
+        contains("repo1.maven.org") ||
+        contains("repo.maven.apache.org") ||
+        contains("nexus", ignoreCase = true) ||
+        contains("artifactory", ignoreCase = true)
 
 internal fun npmUpgradedVersionValue(oldVersion: String, newVersion: String): String? =
     org.knifefish.dependency.helper.services.ecosystem.npmUpgradedVersionValue(oldVersion, newVersion)

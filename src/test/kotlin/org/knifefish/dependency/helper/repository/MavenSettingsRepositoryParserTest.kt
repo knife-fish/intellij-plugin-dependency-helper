@@ -44,7 +44,7 @@ class MavenSettingsRepositoryParserTest {
                 "http://maven.local/repository/maven-public/",
                 "http://maven.local/repository/releases/",
             ),
-            repositories,
+            repositories.repositories,
         )
     }
 
@@ -73,7 +73,7 @@ class MavenSettingsRepositoryParserTest {
 
         val repositories = MavenSettingsRepositoryParser.parse(file)
 
-        assertTrue(repositories.contains("http://maven.local/repository/default/"))
+        assertTrue(repositories.repositories.contains("http://maven.local/repository/default/"))
     }
 
     @Test
@@ -101,6 +101,65 @@ class MavenSettingsRepositoryParserTest {
 
         val repositories = MavenPomRepositoryParser.parse(pom)
 
-        assertEquals(listOf("http://maven.local/repository/public/"), repositories)
+        assertEquals(listOf("http://maven.local/repository/public/"), repositories.repositories)
+    }
+
+    @Test
+    fun pomParserSeparatesPluginRepositories() {
+        val pom = """
+            <project>
+              <repositories>
+                <repository>
+                  <url>http://maven.local/repository/libs</url>
+                </repository>
+              </repositories>
+              <pluginRepositories>
+                <pluginRepository>
+                  <url>http://maven.local/repository/plugins</url>
+                </pluginRepository>
+              </pluginRepositories>
+            </project>
+        """.trimIndent()
+
+        val repositories = MavenPomRepositoryParser.parse(pom)
+
+        assertEquals(listOf("http://maven.local/repository/libs/"), repositories.repositories)
+        assertEquals(listOf("http://maven.local/repository/plugins/"), repositories.pluginRepositories)
+    }
+
+    @Test
+    fun gradleParserSeparatesPluginManagementRepositories() {
+        val gradle = """
+            pluginManagement {
+              repositories {
+                gradlePluginPortal()
+                maven { url = uri("http://gradle.local/plugins") }
+              }
+            }
+            dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                mavenCentral()
+                maven { url = uri("http://gradle.local/libs") }
+              }
+            }
+        """.trimIndent()
+
+        val repositories = GradleRepositoryParser.parse(gradle)
+
+        assertEquals(
+            listOf(
+                "https://repo.maven.apache.org/maven2/",
+                "http://gradle.local/libs/",
+            ),
+            repositories.repositories,
+        )
+        assertEquals(
+            listOf(
+                "https://plugins.gradle.org/m2/",
+                "http://gradle.local/plugins/",
+            ),
+            repositories.pluginRepositories,
+        )
     }
 }

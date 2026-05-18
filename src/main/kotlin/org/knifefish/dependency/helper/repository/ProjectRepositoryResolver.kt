@@ -25,7 +25,7 @@ class ProjectRepositoryResolver(private val project: Project) {
             }
             collectUserRepositories(byEcosystem)
             byEcosystem.mapValues { (ecosystem, repos) ->
-                repos.distinctBy { it.url }.ifEmpty { listOf(ecosystem.defaultRepository) }
+                repos.distinctBy { it.url to it.pluginUrl }.ifEmpty { listOf(ecosystem.defaultRepository) }
             }
         }
     }
@@ -54,25 +54,24 @@ class ProjectRepositoryResolver(private val project: Project) {
         if (!path.exists()) {
             return
         }
-        MavenSettingsRepositoryParser.parse(path).forEach { url ->
-            target += RepositorySpec(Ecosystem.MAVEN, normalizeUrl(url), path.toString(), supportsSearch(url, Ecosystem.MAVEN))
-        }
+        addRepositorySpecs(Ecosystem.MAVEN, target, path.toString(), MavenSettingsRepositoryParser.parse(path))
     }
 
     private fun addPomRepositories(
         file: VirtualFile,
         target: MutableList<RepositorySpec>,
     ) {
-        MavenPomRepositoryParser.parse(file.inputStream.bufferedReader().use { it.readText() }).forEach { url ->
-            target += RepositorySpec(Ecosystem.MAVEN, normalizeUrl(url), file.path, supportsSearch(url, Ecosystem.MAVEN))
-        }
+        addRepositorySpecs(
+            Ecosystem.MAVEN,
+            target,
+            file.path,
+            MavenPomRepositoryParser.parse(file.inputStream.bufferedReader().use { it.readText() }),
+        )
     }
 
     private fun addGradleRepositories(file: VirtualFile, target: MutableList<RepositorySpec>) {
         val text = file.inputStream.bufferedReader().use { it.readText() }
-        extractGradleUrls(text).forEach { url ->
-            target += RepositorySpec(Ecosystem.GRADLE, normalizeUrl(url), file.path, supportsSearch(url, Ecosystem.GRADLE))
-        }
+        addRepositorySpecs(Ecosystem.GRADLE, target, file.path, GradleRepositoryParser.parse(text))
     }
 
     private fun addNpmRepositories(file: VirtualFile, target: MutableList<RepositorySpec>) {
@@ -89,6 +88,33 @@ class ProjectRepositoryResolver(private val project: Project) {
         val text = Files.readString(path)
         extractNpmRegistries(text).forEach { url ->
             target += RepositorySpec(Ecosystem.NPM, normalizeUrl(url), path.toString(), supportsSearch(url, Ecosystem.NPM))
+        }
+    }
+
+    private fun addRepositorySpecs(
+        ecosystem: Ecosystem,
+        target: MutableList<RepositorySpec>,
+        source: String,
+        repositories: ParsedRepositories,
+    ) {
+        if (repositories.pluginRepositories.isEmpty()) {
+            repositories.repositories.forEach { url ->
+                target += RepositorySpec(ecosystem, normalizeUrl(url), source, supportsSearch(url, ecosystem))
+            }
+            return
+        }
+
+        val normalUrls = repositories.repositories.ifEmpty { listOf(ecosystem.defaultRepository.url) }
+        normalUrls.forEach { url ->
+            repositories.pluginRepositories.forEach { pluginUrl ->
+                target += RepositorySpec(
+                    ecosystem = ecosystem,
+                    url = normalizeUrl(url),
+                    source = source,
+                    supportsSearch = supportsSearch(url, ecosystem),
+                    pluginUrl = normalizeUrl(pluginUrl),
+                )
+            }
         }
     }
 
@@ -112,6 +138,7 @@ class ProjectRepositoryResolver(private val project: Project) {
             url.contains("search.maven.org") ||
                 url.contains("repo1.maven.org") ||
                 url.contains("repo.maven.apache.org") ||
+                url.contains("plugins.gradle.org") ||
                 url.contains("nexus", ignoreCase = true) ||
                 url.contains("artifactory", ignoreCase = true)
         Ecosystem.NPM -> true
@@ -135,54 +162,30 @@ class ProjectRepositoryResolver(private val project: Project) {
         return result
     }
 
-    private fun extractGradleUrls(text: String): List<String> {
-        val result = mutableListOf<String>()
-        text.lineSequence().forEach { line ->
-            if (!line.contains("url")) return@forEach
-            extractQuotedHttpValues(line).forEach(result::add)
-        }
-        return result
-    }
-
-    private fun extractQuotedHttpValues(text: String): List<String> {
-        val values = mutableListOf<String>()
-        var index = 0
-        while (index < text.length) {
-            val ch = text[index]
-            if (ch != '"' && ch != '\'') {
-                index++
-                continue
-            }
-            val quote = ch
-            var end = index + 1
-            while (end < text.length && text[end] != quote) {
-                end++
-            }
-            if (end >= text.length) break
-            val candidate = text.substring(index + 1, end).trim()
-            if (candidate.startsWith("http://") || candidate.startsWith("https://")) {
-                values += candidate
-            }
-            index = end + 1
-        }
-        return values
-    }
-
 }
+
+internal data class ParsedRepositories(
+    val repositories: List<String>,
+    val pluginRepositories: List<String> = emptyList(),
+)
 
 internal object MavenSettingsRepositoryParser {
 
-    fun parse(path: Path): List<String> {
+    fun parse(path: Path): ParsedRepositories {
         val document = runCatching {
             DocumentBuilderFactory.newInstance().apply {
                 isNamespaceAware = false
             }.newDocumentBuilder().parse(path.toFile())
-        }.getOrNull() ?: return emptyList()
-        val root = document.documentElement ?: return emptyList()
+        }.getOrNull() ?: return ParsedRepositories(emptyList())
+        val root = document.documentElement ?: return ParsedRepositories(emptyList())
         val activeProfiles = activeProfileIds(root)
         val profileRepositories = repositoriesFromProfiles(root, activeProfiles)
+        val profilePluginRepositories = pluginRepositoriesFromProfiles(root, activeProfiles)
         val mirrors = mirrorUrls(root)
-        return (mirrors + profileRepositories).map(::normalizeUrl).distinct()
+        return ParsedRepositories(
+            repositories = (mirrors + profileRepositories).map(::normalizeUrl).distinct(),
+            pluginRepositories = (mirrors + profilePluginRepositories).map(::normalizeUrl).distinct(),
+        )
     }
 
     private fun activeProfileIds(root: Element): Set<String> {
@@ -222,6 +225,22 @@ internal object MavenSettingsRepositoryParser {
             }
     }
 
+    private fun pluginRepositoriesFromProfiles(root: Element, activeProfileIds: Set<String>): List<String> {
+        return child(root, "profiles")
+            ?.children("profile")
+            .orEmpty()
+            .filter { profile ->
+                val id = child(profile, "id")?.textContent?.trim()
+                id != null && id in activeProfileIds
+            }
+            .flatMap { profile ->
+                child(profile, "pluginRepositories")
+                    ?.children("pluginRepository")
+                    .orEmpty()
+                    .mapNotNull { child(it, "url")?.textContent?.trim()?.takeIf(String::isNotEmpty) }
+            }
+    }
+
     private fun mirrorUrls(root: Element): List<String> {
         return child(root, "mirrors")
             ?.children("mirror")
@@ -249,25 +268,41 @@ internal object MavenSettingsRepositoryParser {
 
 internal object MavenPomRepositoryParser {
 
-    fun parse(xml: String): List<String> {
+    fun parse(xml: String): ParsedRepositories {
         val document = runCatching {
             DocumentBuilderFactory.newInstance().apply {
                 isNamespaceAware = false
             }.newDocumentBuilder().parse(xml.byteInputStream())
-        }.getOrNull() ?: return emptyList()
-        val root = document.documentElement ?: return emptyList()
+        }.getOrNull() ?: return ParsedRepositories(emptyList())
+        val root = document.documentElement ?: return ParsedRepositories(emptyList())
         val repositories = mutableListOf<String>()
+        val pluginRepositories = mutableListOf<String>()
         collectRepositories(root, repositories)
+        collectPluginRepositories(root, pluginRepositories)
         child(root, "profiles")
             ?.children("profile")
             .orEmpty()
-            .forEach { profile -> collectRepositories(profile, repositories) }
-        return repositories.map(::normalizeUrl).distinct()
+            .forEach { profile ->
+                collectRepositories(profile, repositories)
+                collectPluginRepositories(profile, pluginRepositories)
+            }
+        return ParsedRepositories(
+            repositories = repositories.map(::normalizeUrl).distinct(),
+            pluginRepositories = pluginRepositories.map(::normalizeUrl).distinct(),
+        )
     }
 
     private fun collectRepositories(element: Element, target: MutableList<String>) {
         child(element, "repositories")
             ?.children("repository")
+            .orEmpty()
+            .mapNotNull { repository -> child(repository, "url")?.textContent?.trim()?.takeIf(String::isNotEmpty) }
+            .forEach(target::add)
+    }
+
+    private fun collectPluginRepositories(element: Element, target: MutableList<String>) {
+        child(element, "pluginRepositories")
+            ?.children("pluginRepository")
             .orEmpty()
             .mapNotNull { repository -> child(repository, "url")?.textContent?.trim()?.takeIf(String::isNotEmpty) }
             .forEach(target::add)
@@ -286,6 +321,146 @@ internal object MavenPomRepositoryParser {
             }
         }
         return result
+    }
+
+    private fun normalizeUrl(url: String): String = if (url.endsWith("/")) url else "$url/"
+}
+
+internal object GradleRepositoryParser {
+
+    fun parse(text: String): ParsedRepositories {
+        val normalRanges = findNamedBlockRanges(text, "repositories")
+            .filterNot { range -> isInsideNamedBlock(text, range.first, "pluginManagement") }
+        val pluginRanges = findNamedBlockRanges(text, "repositories")
+            .filter { range -> isInsideNamedBlock(text, range.first, "pluginManagement") }
+        return ParsedRepositories(
+            repositories = normalRanges.flatMap { range -> repositoryUrlsFromBlock(text.substring(range.first, range.last + 1)) }
+                .map(::normalizeUrl)
+                .distinct(),
+            pluginRepositories = pluginRanges.flatMap { range -> repositoryUrlsFromBlock(text.substring(range.first, range.last + 1)) }
+                .map(::normalizeUrl)
+                .distinct(),
+        )
+    }
+
+    private fun repositoryUrlsFromBlock(block: String): List<String> {
+        val result = mutableListOf<String>()
+        if (block.contains("mavenCentral()")) {
+            result += "https://repo.maven.apache.org/maven2/"
+        }
+        if (block.contains("google()")) {
+            result += "https://dl.google.com/dl/android/maven2/"
+        }
+        if (block.contains("gradlePluginPortal()")) {
+            result += "https://plugins.gradle.org/m2/"
+        }
+        block.lineSequence().forEach { raw ->
+            val line = stripLineComment(raw).trim()
+            if (line.contains("url")) {
+                extractQuotedHttpValues(line).forEach(result::add)
+            }
+        }
+        return result.distinct()
+    }
+
+    private fun findNamedBlockRanges(text: String, name: String): List<IntRange> {
+        val result = mutableListOf<IntRange>()
+        var index = 0
+        while (index < text.length) {
+            val nameIndex = text.indexOf(name, index)
+            if (nameIndex < 0) break
+            if (!isIdentifierBoundary(text, nameIndex - 1) || !isIdentifierBoundary(text, nameIndex + name.length)) {
+                index = nameIndex + name.length
+                continue
+            }
+            val brace = text.indexOf('{', nameIndex + name.length)
+            if (brace < 0) break
+            val between = text.substring(nameIndex + name.length, brace)
+            if (between.any { !it.isWhitespace() && it != '(' && it != ')' }) {
+                index = nameIndex + name.length
+                continue
+            }
+            val end = matchingBrace(text, brace)
+            if (end != null) {
+                result += nameIndex..end
+                index = end + 1
+            } else {
+                index = brace + 1
+            }
+        }
+        return result
+    }
+
+    private fun isInsideNamedBlock(text: String, offset: Int, name: String): Boolean =
+        findNamedBlockRanges(text, name).any { range -> offset in range }
+
+    private fun matchingBrace(text: String, openBrace: Int): Int? {
+        var depth = 0
+        var quote: Char? = null
+        var index = openBrace
+        while (index < text.length) {
+            val ch = text[index]
+            when {
+                quote != null -> {
+                    if (ch == quote && text.getOrNull(index - 1) != '\\') quote = null
+                }
+                ch == '"' || ch == '\'' -> quote = ch
+                ch == '{' -> depth++
+                ch == '}' -> {
+                    depth--
+                    if (depth == 0) return index
+                }
+            }
+            index++
+        }
+        return null
+    }
+
+    private fun isIdentifierBoundary(text: String, index: Int): Boolean {
+        if (index !in text.indices) return true
+        val ch = text[index]
+        return !ch.isLetterOrDigit() && ch != '_' && ch != '-'
+    }
+
+    private fun extractQuotedHttpValues(text: String): List<String> {
+        val values = mutableListOf<String>()
+        var index = 0
+        while (index < text.length) {
+            val ch = text[index]
+            if (ch != '"' && ch != '\'') {
+                index++
+                continue
+            }
+            val quote = ch
+            var end = index + 1
+            while (end < text.length && text[end] != quote) {
+                end++
+            }
+            if (end >= text.length) break
+            val candidate = text.substring(index + 1, end).trim()
+            if (candidate.startsWith("http://") || candidate.startsWith("https://")) {
+                values += candidate
+            }
+            index = end + 1
+        }
+        return values
+    }
+
+    private fun stripLineComment(text: String): String {
+        var quote: Char? = null
+        var index = 0
+        while (index < text.length - 1) {
+            val ch = text[index]
+            when {
+                quote != null -> {
+                    if (ch == quote && text.getOrNull(index - 1) != '\\') quote = null
+                }
+                ch == '"' || ch == '\'' -> quote = ch
+                ch == '/' && text[index + 1] == '/' -> return text.substring(0, index)
+            }
+            index++
+        }
+        return text
     }
 
     private fun normalizeUrl(url: String): String = if (url.endsWith("/")) url else "$url/"

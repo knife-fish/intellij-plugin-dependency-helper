@@ -13,7 +13,6 @@ import com.intellij.psi.xml.XmlFile
 import com.intellij.psi.xml.XmlTag
 import com.intellij.testFramework.LightVirtualFile
 import org.jetbrains.idea.maven.dom.MavenDomUtil
-import org.jetbrains.idea.maven.dom.model.MavenDomDependency
 import org.jetbrains.idea.maven.model.MavenArtifact
 import org.jetbrains.idea.maven.model.MavenArtifactNode
 import org.jetbrains.idea.maven.project.MavenProject
@@ -115,6 +114,9 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
     }
 
     fun insertManagedVersion(dependency: DependencyCoordinate, newVersion: String): Boolean {
+        if (dependency.isMavenPluginDeclaration()) {
+            return insertPluginVersion(dependency, newVersion)
+        }
         val state = readAction {
             val psiFile = PsiManager.getInstance(project).findFile(dependency.file) as? XmlFile ?: return@readAction null
             val dependencyTag = findDependencyTag(psiFile, dependency.group ?: return@readAction null, dependency.name) ?: return@readAction null
@@ -142,10 +144,21 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
     }
 
     override fun resolveManagedUpgradeOptions(dependency: DependencyCoordinate): List<ManagedUpgradeOption> {
+        return resolveManagedUpgradeOptions(dependency, cachedOnly = false)
+    }
+
+    override fun resolveManagedUpgradeOptionsIfCached(dependency: DependencyCoordinate): List<ManagedUpgradeOption> {
+        return resolveManagedUpgradeOptions(dependency, cachedOnly = true)
+    }
+
+    private fun resolveManagedUpgradeOptions(
+        dependency: DependencyCoordinate,
+        cachedOnly: Boolean,
+    ): List<ManagedUpgradeOption> {
         val repositories = project.dependencyInsightService().repositoriesFor(Ecosystem.MAVEN)
         return discoverManagedUpgradeTargets(dependency).mapNotNull { target ->
             val latest = when (target.kind) {
-                ManagedUpgradeTargetKind.CURRENT -> project.dependencyInsightService().lookupLatestVersion(dependency, repositories).latestStable
+                ManagedUpgradeTargetKind.CURRENT -> lookupLatestVersion(dependency, repositories, cachedOnly)
                 ManagedUpgradeTargetKind.PARENT, ManagedUpgradeTargetKind.BOM -> {
                     val targetDependency = DependencyCoordinate(
                         ecosystem = Ecosystem.MAVEN,
@@ -159,7 +172,7 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
                         lineNumber = 1,
                         versionRange = null,
                     )
-                    project.dependencyInsightService().lookupLatestVersion(targetDependency, repositories).latestStable
+                    lookupLatestVersion(targetDependency, repositories, cachedOnly)
                 }
             }
             if (latest.isNullOrBlank() || latest == target.currentVersion) {
@@ -167,6 +180,19 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
             } else {
                 ManagedUpgradeOption(target, latest)
             }
+        }
+    }
+
+    private fun lookupLatestVersion(
+        dependency: DependencyCoordinate,
+        repositories: List<RepositorySpec>,
+        cachedOnly: Boolean,
+    ): String? {
+        val service = project.dependencyInsightService()
+        return if (cachedOnly) {
+            service.lookupLatestVersionIfCached(dependency, repositories)?.latestStable
+        } else {
+            service.lookupLatestVersion(dependency, repositories).latestStable
         }
     }
 
@@ -182,6 +208,7 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
                 file = dependency.file,
                 groupId = dependency.group,
                 artifactId = dependency.name,
+                scope = dependency.scope,
             )
             val chain = workspaceInheritanceChain(dependency.file)
             val descriptors = chain.mapNotNull { mavenProject ->
@@ -208,7 +235,7 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
                     name = target.artifactId.orEmpty(),
                     version = "",
                     declaredVersion = null,
-                    scope = null,
+                    scope = target.scope,
                     file = target.file,
                     declarationText = "",
                     lineNumber = 1,
@@ -219,6 +246,25 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
             ManagedUpgradeTargetKind.PARENT -> updateParentVersion(target.file, target.groupId, target.artifactId, latestVersion)
             ManagedUpgradeTargetKind.BOM -> updateBomVersion(target.file, target.groupId, target.artifactId, latestVersion)
         }
+    }
+
+    private fun insertPluginVersion(dependency: DependencyCoordinate, newVersion: String): Boolean {
+        val state = readAction {
+            val psiFile = PsiManager.getInstance(project).findFile(dependency.file) as? XmlFile ?: return@readAction null
+            val pluginTag = findPluginTag(psiFile, dependency.group ?: return@readAction null, dependency.name) ?: return@readAction null
+            ManagedDependencyEditState(pluginTag, pluginTag.findFirstSubTag("version"))
+        } ?: return false
+        WriteCommandAction.runWriteCommandAction(project, Runnable {
+            val newTag = createTag("<version>$newVersion</version>")
+            if (state.versionTag != null) {
+                state.versionTag.replace(newTag)
+            } else {
+                state.dependencyTag.addSubTag(newTag, false)
+            }
+            FileDocumentManager.getInstance().getDocument(dependency.file)?.let(FileDocumentManager.getInstance()::saveDocument)
+        })
+        refreshMavenProject(dependency.file)
+        return true
     }
 
     private fun buildProjectNodes(
@@ -269,45 +315,9 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
     }
 
     private fun directDependenciesByKey(mavenProject: MavenProject): Map<String, DependencyCoordinate> {
-        return declaredDependenciesFromMavenModel(mavenProject.file)
+        return MavenDeclarationCollector.collectDependencies(project, mavenProject.file)
             .let { enrichDependencies(mavenProject.file, it) }
             .associateBy { "${it.group}:${it.name}" }
-    }
-
-    private fun declaredDependenciesFromMavenModel(file: VirtualFile): List<DependencyCoordinate> {
-        val model = MavenDomUtil.getMavenDomProjectModel(project, file) ?: return emptyList()
-        val source = model.xmlTag?.containingFile?.text.orEmpty()
-        return model.dependencies.dependencies.mapNotNull { dependency ->
-            dependency.toCoordinate(file, source)
-        }
-    }
-
-    private fun MavenDomDependency.toCoordinate(file: VirtualFile, source: String): DependencyCoordinate? {
-        val group = getGroupId().stringValue?.trim()
-        val artifact = getArtifactId().stringValue?.trim()
-        if (group.isNullOrBlank() || artifact.isNullOrBlank()) {
-            return null
-        }
-
-        val declaredVersion = getVersion().stringValue?.trim()
-        val versionRange = getVersion().xmlTag?.value?.textRange?.let { TextRangeMarker(it.startOffset, it.endOffset) }
-        val fallbackOffset = getArtifactId().xmlTag?.value?.textRange?.endOffset ?: xmlTag?.textRange?.endOffset ?: 0
-        val displayRange = versionRange ?: TextRangeMarker(fallbackOffset, fallbackOffset)
-        val declarationRange = xmlTag?.textRange?.let { TextRangeMarker(it.startOffset, it.endOffset) } ?: displayRange
-        return DependencyCoordinate(
-            ecosystem = Ecosystem.MAVEN,
-            group = group,
-            name = artifact,
-            version = declaredVersion.orEmpty(),
-            declaredVersion = declaredVersion,
-            scope = getScope().stringValue?.trim(),
-            file = file,
-            declarationText = xmlTag?.text?.trim().orEmpty(),
-            lineNumber = source.take(displayRange.startOffset).count { it == '\n' } + 1,
-            versionRange = versionRange,
-            displayRange = displayRange,
-            inspectionRange = declarationRange,
-        )
     }
 
     private fun findDependencyTag(xmlFile: XmlFile, groupId: String, artifactId: String): XmlTag? {
@@ -319,6 +329,22 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
             .flatMap { it.findSubTags("dependency").asSequence() }
             .firstOrNull { tag ->
                 tag.findFirstSubTag("groupId")?.value?.text == groupId &&
+                    tag.findFirstSubTag("artifactId")?.value?.text == artifactId
+            }
+    }
+
+    private fun findPluginTag(xmlFile: XmlFile, groupId: String, artifactId: String): XmlTag? {
+        val build = xmlFile.rootTag?.findFirstSubTag("build") ?: return null
+        val pluginSections = buildList {
+            build.findFirstSubTag("plugins")?.let(::add)
+            build.findFirstSubTag("pluginManagement")?.findFirstSubTag("plugins")?.let(::add)
+        }
+        return pluginSections.asSequence()
+            .flatMap { it.findSubTags("plugin").asSequence() }
+            .firstOrNull { tag ->
+                val declaredGroup = tag.findFirstSubTag("groupId")?.value?.text?.takeIf { it.isNotBlank() }
+                    ?: "org.apache.maven.plugins"
+                declaredGroup == groupId &&
                     tag.findFirstSubTag("artifactId")?.value?.text == artifactId
             }
     }
@@ -504,6 +530,10 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
 
     private fun pomDirectlyManagesDependency(xmlFile: XmlFile, dependency: DependencyCoordinate): Boolean {
         val root = xmlFile.rootTag ?: return false
+        if (dependency.isMavenPluginDeclaration()) {
+            return parseProjectDescriptor(xmlFile)?.managedPlugins.orEmpty()
+                .any { plugin -> plugin.groupId == dependency.group && plugin.artifactId == dependency.name }
+        }
         return root.findFirstSubTag("dependencyManagement")
             ?.findFirstSubTag("dependencies")
             ?.findSubTags("dependency")
@@ -622,7 +652,23 @@ internal fun parseProjectDescriptor(xmlFile: XmlFile): ProjectDescriptor? {
                 PomReference(groupId, artifactId, version)
             }
         }.orEmpty()
-    return ProjectDescriptor(parent, importedBoms)
+    val managedPlugins = root.findFirstSubTag("build")
+        ?.findFirstSubTag("pluginManagement")
+        ?.findFirstSubTag("plugins")
+        ?.findSubTags("plugin")
+        ?.mapNotNull { pluginTag ->
+            val groupId = resolver.resolve(pluginTag.findFirstSubTag("groupId")?.value?.text)
+                ?.takeIf { it.isNotBlank() }
+                ?: "org.apache.maven.plugins"
+            val artifactId = resolver.resolve(pluginTag.findFirstSubTag("artifactId")?.value?.text)
+            val version = resolver.resolve(pluginTag.findFirstSubTag("version")?.value?.text)
+            if (artifactId.isNullOrBlank() || version.isNullOrBlank()) {
+                null
+            } else {
+                PomReference(groupId, artifactId, version)
+            }
+        }.orEmpty()
+    return ProjectDescriptor(parent, importedBoms, managedPlugins)
 }
 
 internal fun collectManagedUpgradeTargets(
@@ -636,6 +682,26 @@ internal fun collectManagedUpgradeTargets(
     val seenParents = linkedSetOf<String>()
     val seenBoms = linkedSetOf<String>()
     descriptors.forEach { managedDescriptor ->
+        if (dependency.isMavenPluginDeclaration()) {
+            managedDescriptor.descriptor.parent?.takeIf { parent ->
+                parentRecursivelyManages(parent, dependency) &&
+                    !workspaceParentDelegates(parent, dependency)
+            }?.let { parent ->
+                val key = "${managedDescriptor.file.path}:${parent.groupId}:${parent.artifactId}"
+                if (seenParents.add(key)) {
+                    targets += ManagedUpgradeTarget(
+                        id = "parent:${targets.size + 1}",
+                        kind = ManagedUpgradeTargetKind.PARENT,
+                        label = "Upgrade parent (${parent.groupId}:${parent.artifactId})",
+                        file = managedDescriptor.file,
+                        groupId = parent.groupId,
+                        artifactId = parent.artifactId,
+                        currentVersion = parent.version,
+                    )
+                }
+            }
+            return@forEach
+        }
         managedDescriptor.descriptor.importedBoms
             .filter { bom -> bomRecursivelyManages(bom, dependency) }
             .forEach { bom ->
@@ -682,6 +748,7 @@ internal data class ManagedProjectDescriptor(
 internal data class ProjectDescriptor(
     val parent: PomReference?,
     val importedBoms: List<PomReference>,
+    val managedPlugins: List<PomReference> = emptyList(),
 )
 
 internal data class PomReference(
@@ -786,9 +853,14 @@ data class ManagedUpgradeTarget(
     val groupId: String?,
     val artifactId: String?,
     val currentVersion: String? = null,
+    val scope: String? = null,
 )
 
 data class ManagedUpgradeOption(
     val target: ManagedUpgradeTarget,
     val latestVersion: String,
 )
+
+private fun DependencyCoordinate.isMavenPluginDeclaration(): Boolean =
+    ecosystem == Ecosystem.MAVEN &&
+        scope in setOf(MavenDeclarationCollector.PLUGIN_SCOPE, MavenDeclarationCollector.PLUGIN_MANAGEMENT_SCOPE)

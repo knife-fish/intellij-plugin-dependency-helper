@@ -22,5 +22,7 @@ interface MavenSupport {
 
     fun resolveManagedUpgradeOptions(dependency: DependencyCoordinate): List<ManagedUpgradeOption>
 
+    fun resolveManagedUpgradeOptionsIfCached(dependency: DependencyCoordinate): List<ManagedUpgradeOption> = emptyList()
+
     fun executeManagedUpgradeTarget(target: ManagedUpgradeTarget, latestVersion: String): Boolean
 }

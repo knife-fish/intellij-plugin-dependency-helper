@@ -50,7 +50,8 @@ data class DependencyCoordinate(
         get() = "${ecosystem.name}:${group.orEmpty()}:$name"
 
     val usesManagedVersion: Boolean
-        get() = ecosystem == Ecosystem.MAVEN && declaredVersion == null
+        get() = ecosystem == Ecosystem.MAVEN &&
+            (declaredVersion == null || (scope in setOf("plugin", "pluginManagement") && versionRange == null))
 }
 
 data class RepositorySpec(
@@ -58,6 +59,7 @@ data class RepositorySpec(
     val url: String,
     val source: String,
     val supportsSearch: Boolean,
+    val pluginUrl: String? = null,
 )
 
 data class VersionInfo(
