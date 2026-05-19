@@ -192,11 +192,14 @@ class DependencyAnalyzerPanel(
             )
         }
 
+        val isMaven = currentFile?.let { DependencyFiles.isMavenPom(it) }
         val secondRow = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
             layout = BorderLayout()
             add(JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
-                add(conflictOnlyCheckbox)
-                add(hideTestScopeCheckbox)
+                if (null != isMaven && isMaven) {
+                    add(conflictOnlyCheckbox)
+                    add(hideTestScopeCheckbox)
+                }
                 add(showGroupIdCheckbox)
                 add(showSizeCheckbox)
             }, BorderLayout.WEST)
@@ -204,13 +207,6 @@ class DependencyAnalyzerPanel(
                 add(JBLabel(message("Label.Latest")))
                 add(latestPolicyCombo)
             }, BorderLayout.EAST)
-        }
-
-        val ecosystem = currentEcosystem()
-        if (ecosystem?.supportsPackageSearch ?: false) {
-            return JPanel(BorderLayout()).apply {
-                add(firstRow, BorderLayout.NORTH)
-            }
         }
 
         return JPanel(GridLayout(2, 1, 0, 4)).apply {
@@ -555,8 +551,8 @@ class DependencyAnalyzerPanel(
             renderSearchResults()
             return
         }
-        val ecosystem = currentEcosystem()
-        if (ecosystem == null || !ecosystem.supportsPackageSearch) {
+        val ecosystem = currentFile?.let { DependencyFiles.ecosystemOf(it) }
+        if (null==ecosystem || !ecosystem.supportsPackageSearch) {
             searchRows.clear()
             renderSearchResults(message("Panel.Search.OpenDependencyFile"))
             return
@@ -625,13 +621,11 @@ class DependencyAnalyzerPanel(
     }
 
     private fun currentDependencyTargetFile(): com.intellij.openapi.vfs.VirtualFile? {
-        currentFile?.let(::resolveGradleDisplayFile)?.takeIf(DependencyFiles::supportsPackageSearch)?.let { return it }
+        currentFile?.let(::resolveGradleDisplayFile)?.let { return it }
         return FileEditorManager.getInstance(project)
             .selectedFiles
-            .firstOrNull(DependencyFiles::supportsPackageSearch)
+            .firstOrNull()
     }
-
-    private fun currentEcosystem(): Ecosystem? = currentDependencyTargetFile()?.let { externalSystems.ecosystemFor(it) }
 
     private fun addSearchResult(rowIndex: Int) {
         val row = searchRows.getOrNull(rowIndex) ?: return
@@ -871,6 +865,7 @@ class DependencyAnalyzerPanel(
                         else -> foreground
                     }
                 }
+
                 is RelationOccurrenceLabel -> text = userObject.label
                 is String -> text = userObject
             }

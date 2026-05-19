@@ -3,7 +3,6 @@ package org.knifefish.dependency.helper.services.external
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
 import org.knifefish.dependency.helper.model.DependencyCoordinate
-import org.knifefish.dependency.helper.model.Ecosystem
 
 /**
  * 外部依赖系统调度器。
@@ -15,15 +14,8 @@ internal class ExternalDependencySystems(private val project: Project) {
     private val systems: List<ExternalDependencySystem>
         get() = ExternalDependencySystem.EP_NAME.extensionList
 
-    /** 根据生态类型查找对应适配器。 */
-    fun forEcosystem(ecosystem: Ecosystem): ExternalDependencySystem? =
-        systems.firstOrNull { it.ecosystem == ecosystem }
-
     /** 判断是否存在可处理该文件的外部系统适配器。 */
     fun supports(file: VirtualFile): Boolean = systems.any { it.supports(file) }
-
-    /** 获取可处理该文件的生态类型。 */
-    fun ecosystemFor(file: VirtualFile): Ecosystem? = systems.firstOrNull { it.supports(file) }?.ecosystem
 
     /** 扫描文件依赖。 */
     fun scan(file: VirtualFile): List<DependencyCoordinate> {

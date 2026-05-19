@@ -35,9 +35,6 @@ object DependencyFiles {
 
     fun isGradleSettings(file: VirtualFile): Boolean = kindOf(file) == DependencyFileKind.GRADLE_SETTINGS
 
-    fun supportsPackageSearch(file: VirtualFile): Boolean =
-        kindOf(file)?.let { it.ecosystem.supportsPackageSearch && it.supportsDependencyInsertion } == true
-
     fun supportsDependencyInsertion(fileName: String, ecosystem: Ecosystem): Boolean {
         val kind = kindOf(fileName) ?: return false
         return kind.ecosystem == ecosystem && kind.supportsDependencyInsertion
