@@ -6,6 +6,7 @@
     <description><![CDATA[
         <p><b>Dependency Helper</b> support Maven and Gradle dependency analysis and package search, Npm package.json version hints.</p>
         <p>It highlights newer releases inline, supports package search, and offers a dependency dashboard with basic conflict and exclusion guidance.</p>
+        <p>It also supports local private repositories, such as Nexus and Jfrog Artifactory.</p>
     ]]></description>
 
     <depends>com.intellij.modules.platform</depends>
