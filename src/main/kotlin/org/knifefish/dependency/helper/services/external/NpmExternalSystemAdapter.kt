@@ -2,6 +2,7 @@ package org.knifefish.dependency.helper.services.external
 
 import com.intellij.javascript.nodejs.PackageJsonData
 import com.intellij.javascript.nodejs.packageJson.PackageJsonFileManager
+import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
 import org.knifefish.dependency.helper.model.*
@@ -24,7 +25,8 @@ internal class NpmExternalSystemAdapter : ExternalDependencySystem {
         }
         // 关键变量：IDE 解析后的 package.json 语义模型。
         val packageJsonData = PackageJsonData.getOrCreateWithPreferredProject(project, file) ?: return emptyList()
-        val source = file.inputStream.bufferedReader().use { it.readText() }
+        val source = FileDocumentManager.getInstance().getDocument(file)?.text
+            ?: file.inputStream.bufferedReader().use { it.readText() }
         // 关键变量：最终输出依赖集合。
         val out = mutableListOf<DependencyCoordinate>()
         packageJsonData.allDependencyEntries.forEach { (name, entry) ->

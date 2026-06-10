@@ -26,10 +26,11 @@ object DependencyInlayManager {
         clear(editor)
         DependencyDocumentationProvider.setEditorLookups(editor, results, latestRule, managedOptions)
         val inlays = mutableListOf<Inlay<*>>()
-        results.forEach { result ->
-            val presentation = buildPresentation(result)
+        val renderTargets = buildRenderTargets(editor, results)
+        renderTargets.forEach { target ->
+            val presentation = buildPresentation(target.result, target.leadingSpaces)
             val inlay = editor.inlayModel.addAfterLineEndElement(
-                result.dependency.displayRange.endOffset,
+                target.lineEndOffset,
                 false,
                 LatestVersionRenderer(presentation),
             )
@@ -46,12 +47,40 @@ object DependencyInlayManager {
         DependencyDocumentationProvider.clearEditorLookups(editor)
     }
 
-    private fun buildPresentation(result: DependencyLookupResult): InlayPresentation {
+    private fun buildRenderTargets(editor: Editor, results: List<DependencyLookupResult>): List<RenderTarget> {
+        val document = editor.document
+        val textLength = document.textLength
+        val lineTargets = results.mapNotNull { result ->
+            val offset = result.dependency.displayRange.endOffset
+            if (offset !in 0..textLength) {
+                return@mapNotNull null
+            }
+            val line = document.getLineNumber(offset)
+            val lineEndOffset = document.getLineEndOffset(line)
+            LineTarget(
+                result = result,
+                lineEndOffset = lineEndOffset,
+                visualEndColumn = editor.offsetToVisualPosition(lineEndOffset).column,
+            )
+        }
+        val hintColumn = lineTargets.maxOfOrNull { it.visualEndColumn }?.plus(MIN_HINT_GAP_COLUMNS)
+            ?: MIN_HINT_GAP_COLUMNS
+        return lineTargets.map { target ->
+            RenderTarget(
+                result = target.result,
+                lineEndOffset = target.lineEndOffset,
+                leadingSpaces = (hintColumn - target.visualEndColumn).coerceAtLeast(MIN_HINT_GAP_COLUMNS),
+            )
+        }
+    }
+
+    private fun buildPresentation(result: DependencyLookupResult, leadingSpaces: Int): InlayPresentation {
         val latest = result.versionInfo.latestStable
+        val prefix = " ".repeat(leadingSpaces)
         return when {
-            latest == null -> InlayPresentation("  ${DependencyHelperBundle.message("Inlay.LatestUnavailable")}", false)
-            !hasRecommendedUpgrade(result.dependency, latest) -> InlayPresentation("  ${DependencyHelperBundle.message("Inlay.UpToDate")}", false)
-            else -> InlayPresentation("  ${DependencyHelperBundle.message("Inlay.Latest", latest)}", true)
+            latest == null -> InlayPresentation(prefix + DependencyHelperBundle.message("Inlay.LatestUnavailable"), false)
+            !hasRecommendedUpgrade(result.dependency, latest) -> InlayPresentation(prefix + DependencyHelperBundle.message("Inlay.UpToDate"), false)
+            else -> InlayPresentation(prefix + DependencyHelperBundle.message("Inlay.Latest", latest), true)
         }
     }
 
@@ -74,4 +103,18 @@ object DependencyInlayManager {
         val text: String,
         val emphasized: Boolean,
     )
+
+    private data class LineTarget(
+        val result: DependencyLookupResult,
+        val lineEndOffset: Int,
+        val visualEndColumn: Int,
+    )
+
+    private data class RenderTarget(
+        val result: DependencyLookupResult,
+        val lineEndOffset: Int,
+        val leadingSpaces: Int,
+    )
+
+    private const val MIN_HINT_GAP_COLUMNS = 2
 }
