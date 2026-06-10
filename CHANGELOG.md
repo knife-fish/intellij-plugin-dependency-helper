@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-06-10
+
+### Fixed
+
+- Fix npm package dependency hint alignment
+
 ## [1.0.2] - 2026-05-19
 
 ### Fixed
@@ -23,7 +29,8 @@
 
 - Initial release of IntelliJ Dependency Helper Plugin. support Maven and Gradle dependency analysis and package search, Npm package.json version hints.
 
-[Unreleased]: https://github.com/knife-fish/intellij-plugin-dependency-helper/compare/1.0.2...HEAD
+[Unreleased]: https://github.com/knife-fish/intellij-plugin-dependency-helper/compare/1.0.3...HEAD
+[1.0.3]: https://github.com/knife-fish/intellij-plugin-dependency-helper/compare/1.0.2...1.0.3
 [1.0.2]: https://github.com/knife-fish/intellij-plugin-dependency-helper/compare/1.0.1...1.0.2
 [1.0.1]: https://github.com/knife-fish/intellij-plugin-dependency-helper/compare/1.0.0...1.0.1
 [1.0.0]: https://github.com/knife-fish/intellij-plugin-dependency-helper/commits/1.0.0
