@@ -5,7 +5,7 @@ rootProject.name = "IntelliJ Dependency Helper Plugin"
 pluginManagement {
     plugins {
         id("org.jetbrains.kotlin.jvm") version "2.4.0"
-        kotlin("plugin.serialization") version "2.0.20"
+        kotlin("plugin.serialization") version "2.4.0"
         id("org.jetbrains.changelog") version "2.5.0"
     }
 }
