@@ -38,6 +38,7 @@ class DependencyDocumentationProvider : DocumentationProviderEx() {
             ?: findLookupForOffset(editor, file, targetOffset)
             ?: return null
         editor.putUserData(EDITOR_LOOKUP_KEY, lookup)
+        lookup.originalElement.putUserData(LOOKUP_RESULT_KEY, lookup)
         val range = lookup.dependency.inspectionRange
         if (targetOffset !in range.startOffset..range.endOffset && file.getUserData(FORCE_LOOKUP_KEY) != true) {
             return null
@@ -72,7 +73,10 @@ class DependencyDocumentationProvider : DocumentationProviderEx() {
         if (!normalizedLink.startsWith("dependency-helper-upgrade")) {
             return null
         }
-        val lookup = context.getUserData(LOOKUP_RESULT_KEY) ?: return context
+        val lookup = context.getUserData(LOOKUP_RESULT_KEY)
+            ?: context.containingFile?.getUserData(FILE_LOOKUP_KEY)?.takeIf { it.originalElement == context || it.contains(context.textOffset) }
+            ?: buildLookupContext(context)
+            ?: return context
         if (lookup.upgradeTriggered) {
             return context
         }
@@ -200,7 +204,10 @@ class DependencyDocumentationProvider : DocumentationProviderEx() {
             } else {
                 emptyList()
             }
-            return DocumentationLookupContext(result.dependency, result.versionInfo, latestRule, managedOptions, metadataPsi, originalElement)
+            return DocumentationLookupContext(result.dependency, result.versionInfo, latestRule, managedOptions, metadataPsi, originalElement).also {
+                originalElement.putUserData(LOOKUP_RESULT_KEY, it)
+                psiFile.putUserData(FILE_LOOKUP_KEY, it)
+            }
         }
 
         private fun resolveManagedOptionsForDocumentation(
@@ -246,7 +253,7 @@ class DependencyDocumentationProvider : DocumentationProviderEx() {
                 project.getService(MavenSupport::class.java)
                     ?.executeManagedUpgradeTarget(option.target, option.latestVersion)
             } else {
-                val latest = lookup.versionInfo.latestStable ?: return
+                val latest = lookup.versionInfo.latestStable ?: lookup.versionInfo.latestAvailable ?: return
                 project.dependencyInsightService().upgradeDependency(lookup.dependency, latest)
             }
         }

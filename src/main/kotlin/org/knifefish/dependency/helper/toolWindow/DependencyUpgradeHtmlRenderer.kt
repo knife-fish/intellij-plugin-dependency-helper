@@ -9,6 +9,7 @@ import org.knifefish.dependency.helper.model.DependencyCoordinate
 import org.knifefish.dependency.helper.model.VersionInfo
 import org.knifefish.dependency.helper.services.ManagedUpgradeOption
 import org.knifefish.dependency.helper.services.ManagedUpgradeTargetKind
+import org.knifefish.dependency.helper.services.hasRecommendedUpgrade
 
 object DependencyUpgradeHtmlRenderer {
 
@@ -25,6 +26,8 @@ object DependencyUpgradeHtmlRenderer {
         val repository = escapeHtml(versionInfo.repositoryUrl ?: DependencyHelperBundle.message("Text.Unavailable"))
         val currentVersion = escapeHtml(dependency.version)
         val latestRuleValue = escapeHtml(latestRule)
+        val recommendedVersion = versionInfo.latestStable ?: versionInfo.latestAvailable
+        val recommendedUpgrade = hasRecommendedUpgrade(dependency, recommendedVersion)
         val content = createHTML().div {
             classes = setOf(DocumentationMarkup.CLASS_CONTENT)
             p {
@@ -42,12 +45,12 @@ object DependencyUpgradeHtmlRenderer {
                 infoRow(DependencyHelperBundle.message("Doc.Repository"), repository)
                 infoRow(DependencyHelperBundle.message("Doc.Rule"), latestRuleValue)
             }
-            if (versionInfo.latestStable != null) {
+            if (recommendedUpgrade && recommendedVersion != null) {
                 p {
                     val upgradeLinks = listOf(
                         UpgradeLink(
                             href = "psi_element://dependency-helper-upgrade:current",
-                            text = DependencyHelperBundle.message("Doc.UpgradeTo", versionInfo.latestStable),
+                            text = DependencyHelperBundle.message("Doc.UpgradeTo", recommendedVersion),
                         )
                     ) + managedOptions
                         .filter { it.target.kind != ManagedUpgradeTargetKind.CURRENT }
