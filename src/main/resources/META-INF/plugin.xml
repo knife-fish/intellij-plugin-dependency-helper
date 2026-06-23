@@ -40,9 +40,13 @@
     <actions>
         <action id="DependencyHelper.RefreshHints"
                 class="org.knifefish.dependency.helper.actions.RefreshDependencyHintsAction"
-                text="%Action.Refresh"/>
+                text="%Action.Refresh">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+        </action>
         <action id="DependencyHelper.UpgradeDependency"
                 class="org.knifefish.dependency.helper.actions.UpgradeDependencyAction"
-                text="%Action.Upgrade"/>
+                text="%Action.Upgrade">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+        </action>
     </actions>
 </idea-plugin>

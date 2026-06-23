@@ -104,7 +104,13 @@ class DependencyAnalyzerPanel(
                 updateAnalysisDetails(selectedNode())
             }
         })
-        dependencyList.addMouseListener(popupHandler { showAnalysisPopup(it.component, it.x, it.y) })
+        dependencyList.addMouseListener(popupHandler { event ->
+            val index = dependencyList.locationToIndex(event.point)
+            if (index >= 0 && dependencyList.getCellBounds(index, index)?.contains(event.point) == true) {
+                dependencyList.selectedIndex = index
+            }
+            showAnalysisPopup(event.component, event.x, event.y)
+        })
 
         dependencyTree.isRootVisible = false
         dependencyTree.cellRenderer = treeRenderer()
@@ -419,18 +425,26 @@ class DependencyAnalyzerPanel(
 
     private fun resolveLatestVersions() {
         latestVersionByKey = emptyMap()
-        val nodes = flatten(roots).filter { it.path.size > 1 }
-        if (nodes.isEmpty()) {
+        val coordinatesByNodeKey = flatten(roots)
+            .asSequence()
+            .filter { it.path.size > 1 }
+            .mapNotNull { node -> nodeCoordinate(node)?.let { node.key to it } }
+            .distinctBy { (_, coordinate) -> "${coordinate.key}:${coordinate.scope.orEmpty()}" }
+            .toList()
+        if (coordinatesByNodeKey.isEmpty()) {
             return
         }
         ApplicationManager.getApplication().executeOnPooledThread {
-            val versions = nodes.associate { node ->
-                val coordinate = nodeCoordinate(node) ?: return@associate node.key to ""
+            val repositoriesByEcosystem = coordinatesByNodeKey
+                .map { (_, coordinate) -> coordinate.ecosystem }
+                .distinct()
+                .associateWith(service::repositoriesFor)
+            val versions = coordinatesByNodeKey.associate { (nodeKey, coordinate) ->
                 val latest = service.lookupLatestVersion(
                     coordinate,
-                    service.repositoriesFor(coordinate.ecosystem),
+                    repositoriesByEcosystem[coordinate.ecosystem].orEmpty(),
                 ).latestStable
-                node.key to (latest ?: "")
+                nodeKey to (latest ?: "")
             }
             ApplicationManager.getApplication().invokeLater {
                 latestVersionByKey = versions
@@ -717,11 +731,11 @@ class DependencyAnalyzerPanel(
         val selected = selectedNode() ?: return
         val source = selected.sourceDependency
         val managedOptions = if (source?.usesManagedVersion == true && mavenSupport != null) {
-            mavenSupport.resolveManagedUpgradeOptions(source)
+            mavenSupport.resolveManagedUpgradeOptionsIfCached(source)
         } else {
             emptyList()
         }
-        val latest = source?.let { service.lookupLatestVersion(it, service.repositoriesFor(it.ecosystem)).latestStable }
+        val latest = source?.let { service.lookupLatestVersionIfCached(it, service.repositoriesFor(it.ecosystem))?.latestStable }
         if (selectedNode() == null) {
             return
         }

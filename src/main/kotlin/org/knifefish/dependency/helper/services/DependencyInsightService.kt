@@ -61,7 +61,7 @@ class DependencyInsightService(private val project: Project) {
         }
 
     fun repositoriesFor(ecosystem: Ecosystem): List<RepositorySpec> =
-        scanProject().repositories[ecosystem].orEmpty()
+        ProjectRepositoryResolver(project).resolveForProject()[ecosystem].orEmpty()
 
     fun lookupLatestVersion(
         dependency: DependencyCoordinate,
@@ -121,6 +121,12 @@ class DependencyInsightService(private val project: Project) {
         forceRefresh: ((DependencyCoordinate) -> Boolean)?,
     ) {
         val file = FileDocumentManager.getInstance().getFile(editor.document) ?: return
+        if (!externalSystems.supports(file)) {
+            ApplicationManager.getApplication().invokeLater {
+                DependencyInlayManager.clear(editor)
+            }
+            return
+        }
         ApplicationManager.getApplication().executeOnPooledThread {
             val dependencies = readAction {
                 withEditorLocations(file, scanFileInternal(file, includeMavenPlugins = true))
@@ -134,19 +140,26 @@ class DependencyInsightService(private val project: Project) {
             }
             val repositories = ProjectRepositoryResolver(project).resolveForProject()
             val latestRule = latestVersionPolicy().displayName
-            val lookups = dependencies.map { dependency ->
+            val lookupByCacheKey = dependencies.distinctBy { dependency ->
+                cacheKey(dependency, repositories[dependency.ecosystem].orEmpty())
+            }.associate { dependency ->
                 val info = lookupLatestVersion(
                     dependency,
                     repositories[dependency.ecosystem].orEmpty(),
                     forceRefresh = forceRefresh?.invoke(dependency) == true,
                 )
+                cacheKey(dependency, repositories[dependency.ecosystem].orEmpty()) to info
+            }
+            val lookups = dependencies.mapNotNull { dependency ->
+                val info = lookupByCacheKey[cacheKey(dependency, repositories[dependency.ecosystem].orEmpty())]
+                    ?: return@mapNotNull null
                 DependencyLookupResult(dependency, info)
             }
             val managedOptions = lookups
                 .filter { result -> result.dependency.usesManagedVersion && result.dependency.ecosystem == Ecosystem.MAVEN }
                 .mapNotNull { result ->
                     val support = project.getService(MavenSupport::class.java) ?: return@mapNotNull null
-                    result.dependency to support.resolveManagedUpgradeOptions(result.dependency)
+                    result.dependency to support.resolveManagedUpgradeOptionsIfCached(result.dependency)
                 }
                 .toMap()
             ApplicationManager.getApplication().invokeLater {
