@@ -120,20 +120,24 @@ class DependencyInsightService(private val project: Project) {
         editor: Editor,
         forceRefresh: ((DependencyCoordinate) -> Boolean)?,
     ) {
+        if (project.isDisposed || editor.isDisposed) return
         val file = FileDocumentManager.getInstance().getFile(editor.document) ?: return
         if (!externalSystems.supports(file)) {
             ApplicationManager.getApplication().invokeLater {
+                if (project.isDisposed || editor.isDisposed) return@invokeLater
                 DependencyInlayManager.clear(editor)
             }
             return
         }
         ApplicationManager.getApplication().executeOnPooledThread {
+            if (project.isDisposed || editor.isDisposed) return@executeOnPooledThread
             val dependencies = readAction {
                 withEditorLocations(file, scanFileInternal(file, includeMavenPlugins = true))
                     .filter(::isEditorLocatable)
             }
             if (dependencies.isEmpty()) {
                 ApplicationManager.getApplication().invokeLater {
+                    if (project.isDisposed || editor.isDisposed) return@invokeLater
                     DependencyInlayManager.clear(editor)
                 }
                 return@executeOnPooledThread
@@ -163,6 +167,7 @@ class DependencyInsightService(private val project: Project) {
                 }
                 .toMap()
             ApplicationManager.getApplication().invokeLater {
+                if (project.isDisposed || editor.isDisposed) return@invokeLater
                 DependencyInlayManager.render(editor, lookups, latestRule, managedOptions)
                 DaemonCodeAnalyzer.getInstance(project).settingsChanged()
             }
