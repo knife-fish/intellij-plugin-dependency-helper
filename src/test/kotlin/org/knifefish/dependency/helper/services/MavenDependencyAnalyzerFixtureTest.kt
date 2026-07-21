@@ -3,9 +3,6 @@ package org.knifefish.dependency.helper.services
 import com.intellij.psi.PsiManager
 import com.intellij.psi.xml.XmlFile
 import com.intellij.testFramework.fixtures.BasePlatformTestCase
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertTrue
 import org.knifefish.dependency.helper.model.DependencyCoordinate
 import org.knifefish.dependency.helper.model.Ecosystem
 import java.nio.file.Path

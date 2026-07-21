@@ -1,9 +1,9 @@
 package org.knifefish.dependency.helper.services
 
 import com.intellij.testFramework.LightVirtualFile
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
-import org.junit.Test
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Test
 import org.knifefish.dependency.helper.model.DependencyCoordinate
 import org.knifefish.dependency.helper.model.Ecosystem
 

@@ -1,7 +1,7 @@
 package org.knifefish.dependency.helper.services
 
-import org.junit.Assert.assertEquals
-import org.junit.Test
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Test
 import java.nio.file.Paths
 
 class GradleCatalogSettingsParserTest {

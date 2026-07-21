@@ -8,7 +8,11 @@ plugins {
 }
 
 dependencies {
+    testImplementation(platform("org.junit:junit-bom:6.1.2"))
+    testImplementation("org.junit.jupiter:junit-jupiter")
     testImplementation("junit:junit:4.13.2")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+    testRuntimeOnly("org.junit.vintage:junit-vintage-engine")
     implementation("org.jetbrains.kotlinx:kotlinx-html-jvm:0.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
 
@@ -20,6 +24,10 @@ dependencies {
         bundledPlugin("JavaScript")
         testFramework(TestFrameworkType.Platform)
     }
+}
+
+tasks.test {
+    useJUnitPlatform()
 }
 
 configurations.configureEach {

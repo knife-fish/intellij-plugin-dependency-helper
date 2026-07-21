@@ -1,8 +1,8 @@
 package org.knifefish.dependency.helper.services
 
 import com.intellij.testFramework.LightVirtualFile
-import junit.framework.TestCase.*
-import org.junit.Test
+import org.junit.jupiter.api.Assertions.*
+import org.junit.jupiter.api.Test
 import org.knifefish.dependency.helper.model.DependencyCoordinate
 import org.knifefish.dependency.helper.model.Ecosystem
 
