@@ -1,14 +1,14 @@
 package org.knifefish.dependency.helper.repository
 
-import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertTrue
-import org.junit.jupiter.api.Test
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
 import java.nio.file.Files
 
 class MavenSettingsRepositoryParserTest {
 
     @Test
-    fun parsesMirrorAndActiveProfileRepositories() {
+    fun testParsesMirrorAndActiveProfileRepositories() {
         val settings = """
             <settings>
               <mirrors>
@@ -49,7 +49,7 @@ class MavenSettingsRepositoryParserTest {
     }
 
     @Test
-    fun usesActiveByDefaultProfilesWhenNoExplicitActiveProfilesExist() {
+    fun testUsesActiveByDefaultProfilesWhenNoExplicitActiveProfilesExist() {
         val settings = """
             <settings>
               <profiles>
@@ -77,7 +77,7 @@ class MavenSettingsRepositoryParserTest {
     }
 
     @Test
-    fun pomParserUsesRepositoriesButIgnoresDistributionManagement() {
+    fun testPomParserUsesRepositoriesButIgnoresDistributionManagement() {
         val pom = """
             <project>
               <repositories>
@@ -105,7 +105,7 @@ class MavenSettingsRepositoryParserTest {
     }
 
     @Test
-    fun pomParserSeparatesPluginRepositories() {
+    fun testPomParserSeparatesPluginRepositories() {
         val pom = """
             <project>
               <repositories>
@@ -128,7 +128,7 @@ class MavenSettingsRepositoryParserTest {
     }
 
     @Test
-    fun gradleParserSeparatesPluginManagementRepositories() {
+    fun testGradleParserSeparatesPluginManagementRepositories() {
         val gradle = """
             pluginManagement {
               repositories {

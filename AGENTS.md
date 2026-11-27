@@ -23,4 +23,4 @@ Tests use JUnit 4 with IntelliJ Platform test fixtures via `BasePlatformTestCase
 Recent history uses short, imperative subjects like `ui settings` and `Template cleanup`. Keep commit titles concise, focused, and under roughly one line; split unrelated work into separate commits. Pull requests should describe user-visible changes, list verification performed (`check`, `verifyPlugin`, or manual `runIde` testing), and link any related issue. Include screenshots only when UI behavior changes, such as tool window updates.
 
 ## Configuration Tips
-The project targets Java 21 in CI and the IntelliJ IDEA platform version declared in `build.gradle.kts`. Update `gradle.properties`, `plugin.xml`, and changelog entries together when preparing a release.
+CI runs Gradle on Java 21. The IntelliJ Platform Gradle Plugin selects the Java 25 toolchain for compiling and testing against IntelliJ IDEA 2026.2.5. Update `gradle.properties`, `plugin.xml`, and changelog entries together when preparing a release.

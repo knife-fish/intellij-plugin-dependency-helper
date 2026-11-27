@@ -120,9 +120,9 @@ class DefaultGradleSupport(private val project: Project) : GradleSupport {
         component: ComponentDependencies,
         parentPath: List<String>,
     ): List<MavenDependencyNodeView> {
-        return listOfNotNull(
-            component.compileDependenciesGraph?.let { "compile" to it },
-            component.runtimeDependenciesGraph?.let { "runtime" to it },
+        return listOf(
+            "compile" to component.compileDependenciesGraph,
+            "runtime" to component.runtimeDependenciesGraph,
         ).flatMap { (scope, graph) ->
             val sourceNodesById = collectSourceNodesById(graph.dependencies)
             graph.dependencies.mapNotNull { dependency ->

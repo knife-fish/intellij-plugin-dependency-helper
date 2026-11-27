@@ -24,7 +24,7 @@ internal class NpmExternalSystemAdapter : ExternalDependencySystem {
             return emptyList()
         }
         // 关键变量：IDE 解析后的 package.json 语义模型。
-        val packageJsonData = PackageJsonData.getOrCreateWithPreferredProject(project, file) ?: return emptyList()
+        val packageJsonData = PackageJsonData.getOrCreateWithPreferredProject(project, file)
         val source = FileDocumentManager.getInstance().getDocument(file)?.text
             ?: file.inputStream.bufferedReader().use { it.readText() }
         // 关键变量：最终输出依赖集合。

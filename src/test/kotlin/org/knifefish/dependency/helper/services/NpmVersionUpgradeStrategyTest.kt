@@ -1,26 +1,26 @@
 package org.knifefish.dependency.helper.services
 
 import com.intellij.testFramework.LightVirtualFile
-import org.junit.jupiter.api.Assertions.*
-import org.junit.jupiter.api.Test
+import org.junit.Assert.*
+import org.junit.Test
 import org.knifefish.dependency.helper.model.DependencyCoordinate
 import org.knifefish.dependency.helper.model.Ecosystem
 
 class NpmVersionUpgradeStrategyTest {
 
     @Test
-    fun preservesCaretAndTildePrefix() {
+    fun testPreservesCaretAndTildePrefix() {
         assertEquals("^2.0.0", npmUpgradedVersionValue("^1.5.0", "2.0.0"))
         assertEquals("~2.0.0", npmUpgradedVersionValue("~1.5.0", "2.0.0"))
     }
 
     @Test
-    fun replacesPlainVersion() {
+    fun testReplacesPlainVersion() {
         assertEquals("2.0.0", npmUpgradedVersionValue("1.5.0", "2.0.0"))
     }
 
     @Test
-    fun skipsLocalGitAndComplexRangeVersions() {
+    fun testSkipsLocalGitAndComplexRangeVersions() {
         assertNull(npmUpgradedVersionValue("workspace:*", "2.0.0"))
         assertNull(npmUpgradedVersionValue("file:../local-lib", "2.0.0"))
         assertNull(npmUpgradedVersionValue("git+https://github.com/foo/bar.git", "2.0.0"))
@@ -29,7 +29,7 @@ class NpmVersionUpgradeStrategyTest {
     }
 
     @Test
-    fun npmCaretAndTildeAreTreatedAsAlreadyLatestWhenBaseEqualsLatest() {
+    fun testNpmCaretAndTildeAreTreatedAsAlreadyLatestWhenBaseEqualsLatest() {
         val file = LightVirtualFile("package.json", "{}")
         val caret = DependencyCoordinate(
             ecosystem = Ecosystem.NPM,

@@ -1,13 +1,13 @@
 package org.knifefish.dependency.helper.services
 
-import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertTrue
-import org.junit.jupiter.api.Test
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
 
 class MavenRepositorySearchBackendTest {
 
     @Test
-    fun detectsNexusRepositoryBackend() {
+    fun testDetectsNexusRepositoryBackend() {
         val backend = MavenRepositorySearchBackend.from("http://nexus.local/repository/maven-public/")
 
         assertEquals(
@@ -20,7 +20,7 @@ class MavenRepositorySearchBackendTest {
     }
 
     @Test
-    fun detectsArtifactoryRepositoryBackend() {
+    fun testDetectsArtifactoryRepositoryBackend() {
         val backend = MavenRepositorySearchBackend.from("https://repo.local/artifactory/libs-release/")
 
         assertEquals(
@@ -33,7 +33,7 @@ class MavenRepositorySearchBackendTest {
     }
 
     @Test
-    fun detectsCentralRepositoryBackend() {
+    fun testDetectsCentralRepositoryBackend() {
         val backend = MavenRepositorySearchBackend.from("https://repo1.maven.org/maven2/")
 
         assertTrue(backend === MavenRepositorySearchBackend.CENTRAL)

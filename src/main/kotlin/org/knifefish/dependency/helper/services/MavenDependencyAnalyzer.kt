@@ -369,7 +369,7 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
     private fun updateBomVersion(file: VirtualFile, groupId: String?, artifactId: String?, newVersion: String): Boolean {
         val versionTag = readAction {
             val model = MavenDomUtil.getMavenDomProjectModel(project, file) ?: return@readAction null
-            model.dependencyManagement?.dependencies?.dependencies.orEmpty()
+            model.dependencyManagement.dependencies.dependencies
                 .firstOrNull {
                     it.groupId.stringValue == groupId &&
                         it.artifactId.stringValue == artifactId &&
@@ -557,7 +557,7 @@ class MavenDependencyAnalyzer(private val project: Project) : MavenSupport {
         xmlFile.rootTag
             ?.findFirstSubTag("properties")
             ?.subTags
-            ?.firstOrNull { tag -> (tag.localName ?: tag.name) == propertyName }
+            ?.firstOrNull { tag -> tag.localName == propertyName }
             ?.let { return it }
         val descriptor = readProjectDescriptor(xmlFile) ?: return null
         val parent = descriptor.parent ?: return null
@@ -822,8 +822,8 @@ internal class PomPropertyResolver private constructor(
             root.findFirstSubTag("properties")
                 ?.subTags
                 ?.forEach { tag ->
-                    val key = tag.localName ?: tag.name
-                    val text = tag.value?.text?.trim().orEmpty()
+                    val key = tag.localName
+                    val text = tag.value.text.trim()
                     if (key.isNotBlank() && text.isNotBlank()) {
                         values[key] = text
                     }

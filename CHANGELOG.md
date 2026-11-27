@@ -6,8 +6,7 @@
 
 ## [1.0.5] - 2026-07-21
 
-- fix: Fix disposed editor access during async refresh by @nilIfNull in https://github.com/knife-fish/intellij-plugin-dependency-helper/pull/20
-- @nilIfNull made their first contribution in https://github.com/knife-fish/intellij-plugin-dependency-helper/pull/20
+- Fix disposed editor access during async refresh
 
 ## [1.0.4] - 2026-06-23
 
@@ -32,8 +31,8 @@
 
 ### Added
 
-- Support maven plugin update hits
-- Support gradle plugin update hits
+- Support Maven plugin update hits
+- Support Gradle plugin update hits
 
 ## [1.0.0] - 2026-05-17
 
