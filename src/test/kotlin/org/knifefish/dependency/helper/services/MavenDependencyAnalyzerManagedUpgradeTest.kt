@@ -1,16 +1,16 @@
 package org.knifefish.dependency.helper.services
 
 import com.intellij.testFramework.LightVirtualFile
-import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertTrue
-import org.junit.jupiter.api.Test
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
 import org.knifefish.dependency.helper.model.DependencyCoordinate
 import org.knifefish.dependency.helper.model.Ecosystem
 
 class MavenDependencyAnalyzerManagedUpgradeTest {
 
     @Test
-    fun offersParentUpgradeForPluginManagedByParentPluginManagement() {
+    fun testOffersParentUpgradeForPluginManagedByParentPluginManagement() {
         val appProject = LightVirtualFile("app-pom.xml", "<project/>")
         val dependency = DependencyCoordinate(
             ecosystem = Ecosystem.MAVEN,
@@ -52,7 +52,7 @@ class MavenDependencyAnalyzerManagedUpgradeTest {
     }
 
     @Test
-    fun prefersDirectWorkspaceBomOverParentWhenParentOnlyDelegates() {
+    fun testPrefersDirectWorkspaceBomOverParentWhenParentOnlyDelegates() {
         val moduleA = LightVirtualFile("moduleA-pom.xml", "<project/>")
         val moduleB = LightVirtualFile("moduleB-pom.xml", "<project/>")
         val dependency = DependencyCoordinate(
@@ -104,7 +104,7 @@ class MavenDependencyAnalyzerManagedUpgradeTest {
     }
 
     @Test
-    fun prefersWorkspaceBomProjectWhenParentAndBomLiveInDifferentWorkspaceProjects() {
+    fun testPrefersWorkspaceBomProjectWhenParentAndBomLiveInDifferentWorkspaceProjects() {
         val appProject = LightVirtualFile("app-pom.xml", "<project/>")
         val parentProject = LightVirtualFile("parent-pom.xml", "<project/>")
         val bomProject = LightVirtualFile("bom-pom.xml", "<project/>")

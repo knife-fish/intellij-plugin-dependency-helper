@@ -1,13 +1,13 @@
 package org.knifefish.dependency.helper.services
 
-import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Test
+import org.junit.Assert.assertEquals
+import org.junit.Test
 import java.nio.file.Paths
 
 class GradleCatalogSettingsParserTest {
 
     @Test
-    fun parsesSingleLineRemoteCatalogDeclaration() {
+    fun testParsesSingleLineRemoteCatalogDeclaration() {
         val settings = """
             dependencyResolutionManagement {
                 repositories {
@@ -26,7 +26,7 @@ class GradleCatalogSettingsParserTest {
     }
 
     @Test
-    fun parsesBlockCatalogDeclaration() {
+    fun testParsesBlockCatalogDeclaration() {
         val settings = """
             dependencyResolutionManagement {
                 versionCatalogs {

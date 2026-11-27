@@ -4,5 +4,8 @@
 .intellijPlatform
 .kotlin
 build
+out
+
+src/test/testData
 
 *.local.md

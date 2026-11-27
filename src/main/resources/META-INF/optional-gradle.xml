@@ -5,6 +5,7 @@
     </extensions>
 
     <extensions defaultExtensionNs="com.intellij">
+        <postStartupActivity implementation="org.knifefish.dependency.helper.startup.GradleProjectActivity"/>
         <projectService serviceInterface="org.knifefish.dependency.helper.services.GradleSupport"
                         serviceImplementation="org.knifefish.dependency.helper.services.DefaultGradleSupport"/>
         <lang.documentationProvider
